@@ -54,24 +54,31 @@ class RedshiftTokenizer:
         self._min_z = self._sorted_z[0].item()
         self._max_z = self._sorted_z[-1].item()
     
+    @property
+    def device(self) -> torch.device:
+        if self._sorted_z is None:
+            return torch.device("cpu")
+        return self._sorted_z.device
+
     def _cdf(self, z: torch.Tensor) -> torch.Tensor:
         """Compute empirical CDF P(Z <= z)."""
         if not self.is_fitted:
             raise RuntimeError("Tokenizer not fitted. Call fit() first.")
-        
+
+        orig_shape = z.shape
+        z = z.to(device=self.device, dtype=self._sorted_z.dtype).flatten()
         # For each z, find proportion of sorted_redshifts <= z
-        # searchsorted returns the index where z would be inserted
-        idx = torch.searchsorted(self._sorted_z, z.flatten())
-        # Normalize to [0, 1], with small epsilon to avoid exact 0/1
+        idx = torch.searchsorted(self._sorted_z, z)
         cdf = idx.float() / len(self._sorted_z)
         cdf = torch.clamp(cdf, 1e-6, 1 - 1e-6)
-        return cdf.reshape(z.shape)
+        return cdf.reshape(orig_shape)
     
     def _inverse_cdf(self, p: torch.Tensor) -> torch.Tensor:
         """Inverse empirical CDF: given quantile p, return z."""
         if not self.is_fitted:
             raise RuntimeError("Tokenizer not fitted. Call fit() first.")
-        
+
+        p = p.to(device=self.device, dtype=self._sorted_z.dtype)
         p = torch.clamp(p, 0.0, 1.0)
         # Map quantile to index in sorted array
         idx = (p * (len(self._sorted_z) - 1)).long()
@@ -85,7 +92,8 @@ class RedshiftTokenizer:
         """
         # Clamp to avoid infinities at exactly 0 or 1
         cdf = torch.clamp(cdf, 1e-6, 1 - 1e-6)
-        gaussian = torch.sqrt(torch.tensor(2.0)) * torch.erfinv(2 * cdf - 1)
+        two = torch.tensor(2.0, device=cdf.device, dtype=cdf.dtype)
+        gaussian = torch.sqrt(two) * torch.erfinv(2 * cdf - 1)
         return gaussian
     
     def gaussian_to_cdf(self, gaussian: torch.Tensor) -> torch.Tensor:
@@ -93,7 +101,8 @@ class RedshiftTokenizer:
         
         Φ(g) = 0.5 * (1 + erf(g / sqrt(2)))
         """
-        cdf = 0.5 * (1 + torch.erf(gaussian / torch.sqrt(torch.tensor(2.0))))
+        two = torch.tensor(2.0, device=gaussian.device, dtype=gaussian.dtype)
+        cdf = 0.5 * (1 + torch.erf(gaussian / torch.sqrt(two)))
         return torch.clamp(cdf, 0.0, 1.0)
     
     def encode(self, z: Union[torch.Tensor, float]) -> torch.Tensor:

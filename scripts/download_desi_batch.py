@@ -40,26 +40,30 @@ def list_available_pixels():
 
 
 def download_pixel(hp_dir, hp_pixel, output_dir, overwrite=False):
-    """Download a single healpix pixel."""
+    """Download coadd + redrock FITS for a single healpix pixel."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    
-    filename = f"coadd-sv3-bright-{hp_pixel}.fits"
-    url = f"{BASE_URL}/{hp_dir}/{hp_pixel}/{filename}"
-    filepath = output_dir / filename
-    
-    if filepath.exists() and not overwrite:
-        return filepath
-    
-    try:
-        r = requests.get(url, timeout=120)
-        r.raise_for_status()
-        with open(filepath, "wb") as f:
-            f.write(r.content)
-        return filepath
-    except Exception as e:
-        print(f"Error downloading {filename}: {e}")
-        return None
+    base = f"{BASE_URL}/{hp_dir}/{hp_pixel}"
+    downloaded = []
+
+    for prefix in ("coadd", "redrock"):
+        filename = f"{prefix}-sv3-bright-{hp_pixel}.fits"
+        url = f"{base}/{filename}"
+        filepath = output_dir / filename
+        if filepath.exists() and not overwrite:
+            downloaded.append(filepath)
+            continue
+        try:
+            r = requests.get(url, timeout=120)
+            r.raise_for_status()
+            with open(filepath, "wb") as f:
+                f.write(r.content)
+            downloaded.append(filepath)
+        except Exception as e:
+            print(f"Error downloading {filename}: {e}")
+
+    coadd = output_dir / f"coadd-sv3-bright-{hp_pixel}.fits"
+    return coadd if coadd.exists() else None
 
 
 def main():

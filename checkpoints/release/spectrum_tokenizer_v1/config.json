@@ -1,0 +1,7 @@
+{
+  "model_id": "spectrum_tokenizer_v1",
+  "display_name": "Spectrum-FM Spectrum Tokenizer v1",
+  "wandb_artifact": "jjayaseelan-university-of-san-francisco/redshifty/spectrum_tokenizer_v1:best",
+  "checkpoint": "spectrum_tokenizer_v1/best.pt",
+  "role": "spectrum_tokenizer"
+}

@@ -1,0 +1,87 @@
+{
+  "wandb_entity": "jjayaseelan-university-of-san-francisco",
+  "wandb_project": "redshifty",
+  "metrics_source": "W&B API (verified 2026-05-20)",
+  "models": {
+    "spectrum_tokenizer_v1": {
+      "display_name": "Spectrum-FM Spectrum Tokenizer v1",
+      "wandb_artifact": "jjayaseelan-university-of-san-francisco/redshifty/spectrum_tokenizer_v1:best",
+      "wandb_run_id": "j68i7wyx",
+      "wandb_run_name": "upload_spectrum_tokenizer_v1",
+      "checkpoint": "spectrum_tokenizer_v1/best.pt",
+      "role": "spectrum_tokenizer"
+    },
+    "transformer_approach_a_fm_v1_10k_ddp4_rw10_v8": {
+      "display_name": "Spectrum-FM Transformer — Approach A (encoder sees z)",
+      "wandb_artifact": "jjayaseelan-university-of-san-francisco/redshifty/approach_a_fm_v1_10k_a_ddp4_rw10_v8:best",
+      "wandb_run_id": "8fglr5zl",
+      "wandb_run_name": "fm_v1_10k_a_ddp4_rw10_v8",
+      "wandb_run_url": "https://wandb.ai/jjayaseelan-university-of-san-francisco/redshifty/runs/8fglr5zl",
+      "checkpoint": "transformer_approach_a_fm_v1_10k_ddp4_rw10_v8/best.pt",
+      "approach": "a",
+      "requires_tokenizer": "spectrum_tokenizer_v1",
+      "best_artifact_step": 22000,
+      "best_artifact_val_loss": 0.8678884017467499
+    }
+  },
+  "default_tokenizer": "spectrum_tokenizer_v1",
+  "default_transformer": "transformer_approach_a_fm_v1_10k_ddp4_rw10_v8",
+  "approach_a_results": {
+    "display_name": "Approach A — primary release model",
+    "training_run": "fm_v1_10k_a_ddp4_rw10_v8",
+    "wandb_run_id": "8fglr5zl",
+    "wandb_run_state": "crashed",
+    "manifest": "dr1_10k_scratch.jsonl",
+    "n_healpix_train_records": 9500,
+    "encoder_mask_ratio": 0.5,
+    "redshift_loss_weight": 1.0,
+    "batch_size": 32,
+    "lr": 0.0008,
+    "best_step": 22000,
+    "val_loss": 0.8678884017467499,
+    "val_redshift_acc_teacher_forced": 1.0,
+    "val_redshift_acc_autoregressive": 1.0,
+    "val_spectrum_acc_teacher_forced": 0.7279826056957245,
+    "val_spectrum_acc_autoregressive": 0.6468026169518707,
+    "val_masked_spec_acc_teacher_forced": 0.45549714836815686,
+    "val_ar_n_samples": 201,
+    "note": "Metrics from W&B summary at best artifact (step 22000). Different run than phase10_mask50_a_big."
+  },
+  "approach_b_results": {
+    "display_name": "Approach B (encoder never sees z) — metrics only",
+    "training_run": "phase10_mask50_b",
+    "wandb_run_id": "3na766th",
+    "wandb_run_state": "failed",
+    "wandb_run_url": "https://wandb.ai/jjayaseelan-university-of-san-francisco/redshifty/runs/3na766th",
+    "manifest": "dr1_200_scratch.jsonl",
+    "encoder_mask_ratio": 0.5,
+    "redshift_loss_weight": 50.0,
+    "batch_size": 8,
+    "lr": 0.0002,
+    "steps": 9500,
+    "val_loss": 2.755182971954346,
+    "val_redshift_acc_teacher_forced": 0.018047619462013244,
+    "val_redshift_acc_autoregressive": 0.03571428571428571,
+    "val_spectrum_acc_teacher_forced": 0.2823441508412361,
+    "val_spectrum_acc_autoregressive": 0.05272108843537415,
+    "val_masked_spec_acc_teacher_forced": 0.2813200719457822,
+    "val_ar_n_samples": 28,
+    "conclusion": "Encoder does not learn redshift from spectrum alone; contrast with Approach A release model.",
+    "note": "No checkpoint shipped — logged results from W&B run phase10_mask50_b only."
+  },
+  "reference_runs": {
+    "phase10_mask50_a_big": {
+      "wandb_run_id": "lnei7vb7",
+      "wandb_run_name": "phase10_mask50_a_big",
+      "wandb_run_state": "failed",
+      "steps": 4000,
+      "redshift_loss_weight": 50.0,
+      "batch_size": 32,
+      "val_redshift_acc_teacher_forced": 0.7377476060390472,
+      "val_redshift_acc_autoregressive": 0.5504587155963303,
+      "val_spectrum_acc_teacher_forced": 0.2398373708128929,
+      "val_spectrum_acc_autoregressive": 0.01156030513828679,
+      "note": "Earlier Phase-10 writeup run on 200-healpix manifest; not the shipped release checkpoint."
+    }
+  }
+}

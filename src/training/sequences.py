@@ -79,10 +79,8 @@ def tokenize_and_build(
         spec_indices = spec_indices.squeeze(1)
     spec_tokens = spec_indices.long() + SPECTRUM_TOKEN_OFFSET  # (B, T_spec)
 
-    redshift_idx = torch.tensor(
-        [z_tok.encode(float(z)) for z in z_vals.tolist()],
-        dtype=torch.long, device=device,
-    )
+    z_batch = z_vals.float().to(device=z_tok.device)
+    redshift_idx = z_tok.encode(z_batch).long().to(device)
     redshift_tokens = redshift_idx + REDSHIFT_TOKEN_OFFSET  # (B,)
 
     B, T_spec = spec_tokens.shape

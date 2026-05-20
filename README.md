@@ -21,6 +21,43 @@ Our model inverts AION-1's breadth-for-depth trade-off: **one modality, treated 
 - 7,081-pixel wavelength grid spanning ~3,600–9,800 Å
 - Redshift provided by DESI pipeline
 
+## PHYS303 final submission
+
+Official trained weights live under [`checkpoints/release/`](checkpoints/release/) (from W&B project `redshifty`, entity `jjayaseelan-university-of-san-francisco`):
+
+| `model_id` | Role |
+|------------|------|
+| `spectrum_tokenizer_v1` | Frozen spectrum codec |
+| `transformer_approach_a_fm_v1_10k_ddp4_rw10_v8` | Primary transformer (Approach A) |
+
+**Run the submission notebook:** [`notebooks/08_PHYS303_final_submission.ipynb`](notebooks/08_PHYS303_final_submission.ipynb) — overview, training summary, instructor NumPy/FITS inference.
+
+### Final validation metrics
+
+Held-out validation on the DR1 10k-healpix manifest (`dr1_10k_scratch.jsonl`, encoder mask ratio 0.5). Source: W&B best checkpoint at step 22k ([`checkpoints/release/MANIFEST.json`](checkpoints/release/MANIFEST.json), verified 2026-05-20).
+
+| Model | Run | Val loss | z (TF) | z (AR) | Spectrum (TF) | Spectrum (AR) | Masked spec (TF) |
+|-------|-----|----------|--------|--------|---------------|---------------|------------------|
+| **Approach A** (release) | `fm_v1_10k_a_ddp4_rw10_v8` | 0.868 | **100.0%** | **100.0%** | 72.8% | 64.7% | 45.5% |
+| Approach B (no weights) | `phase10_mask50_b` | 2.755 | 1.8% | 3.6% | 28.2% | 5.3% | 28.1% |
+
+- **TF** = teacher-forced decode; **AR** = autoregressive generation (no teacher forcing).
+- **Masked spec (TF)** = accuracy only at decoder positions whose encoder input was `[MASK]` (the honest reconstruction metric; unmasked copy inflates overall spectrum accuracy).
+- Approach A: encoder sees the redshift token (`redshift_loss_weight` = 1.0). Approach B: encoder never sees `z` (`redshift_loss_weight` = 50.0) — redshift is not learned from spectrum alone.
+
+Release training run: [W&B `8fglr5zl`](https://wandb.ai/jjayaseelan-university-of-san-francisco/redshifty/runs/8fglr5zl). Refresh metrics: `python scripts/sync_wandb_metrics.py`.
+
+**Checkpoints (~1.4 GB):** tracked with Git LFS.
+
+```bash
+git lfs install
+git lfs pull
+# If release/ has symlinks only, materialize real files before commit:
+python scripts/setup_release_checkpoints.py --copy
+```
+
+Re-download from W&B: `python scripts/download_release_checkpoints.py` (requires `WANDB_API_KEY` in `.env`).
+
 ## Quick Start
 
 ### Local Smoke Testing (Mac MPS)

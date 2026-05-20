@@ -150,9 +150,13 @@ data/*.npz
 data/raw/
 data/processed/
 
-# Model checkpoints (large)
-checkpoints/
+# Model checkpoints (large) — release/ is tracked via Git LFS
+checkpoints/*
+!checkpoints/release/
+!checkpoints/release/**
+checkpoints/wandb_artifacts/
 *.pt
+!checkpoints/release/**/*.pt
 *.pth
 *.ckpt
 
