@@ -18,6 +18,7 @@ from src.models.transformer import (
     build_approach_a_sequences,
     build_approach_b_sequences,
     PAD_TOKEN,
+    REDMASK_TOKEN,
 )
 
 
@@ -30,8 +31,13 @@ class TokenizedSpectrumDataset(Dataset):
         redshift_tokenizer: Fitted RedshiftTokenizer
         approach: 'a' for joint redshift, 'b' for masked redshift
         device: Device for tokenization
+        redshift_mask_ratio: per-sample probability of replacing the encoder's
+            redshift token with REDMASK (Approach A only). Redshift conditioning
+            dropout — forces predicting z from the spectrum instead of copying.
+            Train with e.g. 0.5; eval/inference pass 1.0 (always hide z).
+            Ignored for Approach B. Default 0.0 = z always visible.
     """
-    
+
     def __init__(
         self,
         spectra: List[Dict],
@@ -39,14 +45,18 @@ class TokenizedSpectrumDataset(Dataset):
         redshift_tokenizer: RedshiftTokenizer,
         approach: str = 'a',
         device: torch.device = torch.device('cpu'),
+        redshift_mask_ratio: float = 0.0,
     ):
         self.spectra = spectra
         self.spectrum_tokenizer = spectrum_tokenizer.to(device)
         self.redshift_tokenizer = redshift_tokenizer
         self.approach = approach.lower()
         self.device = device
-        
+        self.redshift_mask_ratio = float(redshift_mask_ratio)
+
         assert self.approach in ('a', 'b'), f"approach must be 'a' or 'b', got {approach}"
+        assert 0.0 <= self.redshift_mask_ratio <= 1.0, \
+            f"redshift_mask_ratio must be in [0, 1], got {redshift_mask_ratio}"
     
     def __len__(self):
         return len(self.spectra)
@@ -75,9 +85,15 @@ class TokenizedSpectrumDataset(Dataset):
         # Build sequences
         if self.approach == 'a':
             enc, dec_in, target = build_approach_a_sequences(redshift_token, spectrum_tokens)
+            # Redshift conditioning dropout: hide z from the encoder (index 1,
+            # right after SOS) so the model can't copy it. decoder_input/target
+            # keep the true redshift token.
+            if self.redshift_mask_ratio > 0.0 and torch.rand(()) < self.redshift_mask_ratio:
+                enc = enc.clone()
+                enc[1] = REDMASK_TOKEN
         else:
             enc, dec_in, target = build_approach_b_sequences(redshift_token, spectrum_tokens)
-        
+
         return {
             'encoder_input': enc,
             'decoder_input': dec_in,

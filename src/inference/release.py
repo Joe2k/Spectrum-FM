@@ -251,11 +251,18 @@ def predict_teacher_forced(
     approach: str,
     device: torch.device,
     encoder_mask_ratio: float = 0.0,
+    redshift_mask_ratio: float = 1.0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Returns (enc, dec, target, pred, denorm)."""
+    """Returns (enc, dec, target, pred, denorm).
+
+    `redshift_mask_ratio` defaults to 1.0: the released model always predicts
+    redshift from the spectrum without seeing it (Approach A). Pass 0.0 to
+    deliberately give the model the true redshift (e.g. for diagnostics).
+    """
     enc, dec, tgt, _ = tokenize_and_build(
         batch, spec_tok, z_tok, approach, device,
         encoder_mask_ratio=encoder_mask_ratio,
+        redshift_mask_ratio=redshift_mask_ratio,
     )
     logits, _ = model(enc, dec, targets=tgt)
     pred = logits.argmax(dim=-1)
@@ -277,11 +284,18 @@ def predict_autoregressive(
     device: torch.device,
     temperature: float = 1.0,
     encoder_mask_ratio: float = 0.0,
+    redshift_mask_ratio: float = 1.0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Returns (generated, target)."""
+    """Returns (generated, target).
+
+    `redshift_mask_ratio` defaults to 1.0: z is hidden from the encoder so the
+    model generates redshift from the spectrum (then conditions the spectrum on
+    its own generated z). Pass 0.0 to give the model the true redshift.
+    """
     enc, _, tgt, _ = tokenize_and_build(
         batch, spec_tok, z_tok, approach, device,
         encoder_mask_ratio=encoder_mask_ratio,
+        redshift_mask_ratio=redshift_mask_ratio,
     )
     generated = model.generate(
         enc,

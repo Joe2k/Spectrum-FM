@@ -105,6 +105,14 @@ def parse_args():
                    help="Fraction of encoder spectrum positions to replace "
                         "with [MASK]. BERT-style. 0.0 disables; 0.15 is "
                         "BERT canonical. Forces honest spectrum reconstruction.")
+    p.add_argument("--redshift-mask-ratio", type=float, default=0.5,
+                   help="Per-sample probability of replacing the encoder's "
+                        "redshift token with [REDMASK] (Approach A only). "
+                        "Redshift conditioning dropout: forces the model to "
+                        "predict z from the spectrum instead of copying it. "
+                        "0.0 disables (z always visible = copy path open); "
+                        "0.5 = z hidden half the time. Eval/inference always "
+                        "hide z (ratio 1.0).")
     p.add_argument("--ar-eval-batches", type=int, default=4,
                    help="Number of batches to run through autoregressive "
                         "eval at end-of-run and on best checkpoint.")
@@ -175,6 +183,7 @@ def main():
 
     print(f"[setup] rank={rank}/{world_size} device={device} approach={args.approach} "
           f"steps={args.steps} mask_ratio={args.encoder_mask_ratio} "
+          f"redshift_mask_ratio={args.redshift_mask_ratio} "
           f"redshift_weight={args.redshift_loss_weight}")
     run_dir = args.scratch_out / "checkpoints" / args.run_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -312,6 +321,7 @@ def main():
         enc, dec, tgt, mask_pos = tokenize_and_build(
             raw, spec_tok, z_tok, args.approach, device,
             encoder_mask_ratio=args.encoder_mask_ratio,
+            redshift_mask_ratio=args.redshift_mask_ratio,
         )
 
         optim.zero_grad(set_to_none=True)
@@ -363,11 +373,14 @@ def main():
             }, step=step)
 
         if rank == 0 and step > 0 and step % args.val_every == 0:
+            # Hide z from the encoder (ratio 1.0) so the redshift metrics
+            # reflect the honest inference-time, predict-z-from-spectrum case.
             v = evaluate(
                 model.module if is_distributed else model,
                 val_loader, spec_tok, z_tok, args.approach, device,
                 args.amp, args.redshift_loss_weight,
                 encoder_mask_ratio=args.encoder_mask_ratio,
+                redshift_mask_ratio=1.0,
             )
             model.train()
             print(f"[val   {step:6d}] " + " ".join(f"{k}={v[k]:.4f}" for k in v))
@@ -392,6 +405,7 @@ def main():
                     "tokenizer_ckpt_path": str(args.tokenizer_ckpt),
                     "approach": args.approach,
                     "encoder_mask_ratio": args.encoder_mask_ratio,
+                    "redshift_mask_ratio": args.redshift_mask_ratio,
                 }, p)
                 print(f"  *** new best val_loss={best_val:.4f} -> {p}")
                 if args.cfs_out is not None:
@@ -412,23 +426,37 @@ def main():
                             "step": step,
                             "approach": args.approach,
                             "encoder_mask_ratio": args.encoder_mask_ratio,
+                            "redshift_mask_ratio": args.redshift_mask_ratio,
                             "redshift_loss_weight": args.redshift_loss_weight,
                             "full_state": True,
                         },
                     )
 
+                # Honest AR redshift accuracy: z hidden from the encoder.
                 ar = evaluate_ar(
                     model.module if is_distributed else model,
                     val_loader, spec_tok, z_tok, args.approach, device,
                     max_batches=args.ar_eval_batches,
                     encoder_mask_ratio=args.encoder_mask_ratio,
+                    redshift_mask_ratio=1.0,
+                )
+                # z-given AR for comparison (exposes any residual copy path).
+                ar_zgiven = evaluate_ar(
+                    model.module if is_distributed else model,
+                    val_loader, spec_tok, z_tok, args.approach, device,
+                    max_batches=args.ar_eval_batches,
+                    encoder_mask_ratio=args.encoder_mask_ratio,
+                    redshift_mask_ratio=0.0,
                 )
                 model.train()
-                print(f"  [ar_best {step:6d}] " + " ".join(f"{k}={ar[k]}" for k in ar))
+                print(f"  [ar_best {step:6d}] " + " ".join(f"{k}={ar[k]}" for k in ar)
+                      + f" | zgiven_redshift_acc={ar_zgiven['ar_redshift_acc']}")
                 with metrics_path.open("a") as f:
                     f.write(json.dumps({"kind": "ar_best", "step": step,
-                                        **{f"val_ar_{k}": vv for k, vv in ar.items()}}) + "\n")
-                wlog(wandb_run, {f"val_ar/{k}": vv for k, vv in ar.items()}, step=step)
+                                        **{f"val_ar_{k}": vv for k, vv in ar.items()},
+                                        "val_ar_redshift_acc_zgiven": ar_zgiven["ar_redshift_acc"]}) + "\n")
+                wlog(wandb_run, {**{f"val_ar/{k}": vv for k, vv in ar.items()},
+                                 "val_ar/redshift_acc_zgiven": ar_zgiven["ar_redshift_acc"]}, step=step)
 
         if rank == 0 and step > 0 and step % args.save_every == 0:
             p = run_dir / f"step_{step:08d}.pt"
@@ -453,6 +481,7 @@ def main():
             "tokenizer_ckpt_path": str(args.tokenizer_ckpt),
             "approach": args.approach,
             "encoder_mask_ratio": args.encoder_mask_ratio,
+            "redshift_mask_ratio": args.redshift_mask_ratio,
         }, p)
         print(f"[done] final -> {p}  best_val_loss={best_val:.4f}")
         if args.cfs_out is not None:
@@ -476,6 +505,7 @@ def main():
             val_loader, spec_tok, z_tok, args.approach, device,
             max_batches=args.ar_eval_batches,
             encoder_mask_ratio=args.encoder_mask_ratio,
+            redshift_mask_ratio=1.0,
         )
         print(f"[ar_final {step:6d}] " + " ".join(f"{k}={ar_final[k]}" for k in ar_final))
         with metrics_path.open("a") as f:

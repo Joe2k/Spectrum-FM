@@ -23,6 +23,7 @@ import torch
 from src.models.transformer import (
     EOS_TOKEN,
     MASK_TOKEN,
+    REDMASK_TOKEN,
     REDSHIFT_TOKEN_OFFSET,
     SOS_TOKEN,
     SPECTRUM_TOKEN_OFFSET,
@@ -36,6 +37,7 @@ def tokenize_and_build(
     approach: str,
     device: torch.device,
     encoder_mask_ratio: float = 0.0,
+    redshift_mask_ratio: float = 0.0,
     rng: Optional[torch.Generator] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Convert a raw spectrum batch into transformer-ready sequences.
@@ -50,6 +52,15 @@ def tokenize_and_build(
         encoder_mask_ratio: fraction of encoder spectrum positions to
             replace with `MASK_TOKEN` (BERT-style). Decoder input and
             target are NOT modified. Default 0.0 = no masking.
+        redshift_mask_ratio: probability (per sample) of replacing the
+            encoder's redshift token with `REDMASK_TOKEN` — redshift
+            conditioning dropout. Forces the model to predict redshift
+            from the spectrum instead of copying it from the encoder.
+            Decoder input and target keep the TRUE redshift token, so
+            position-0 is still supervised against the real value.
+            Train with a value in (0, 1) (e.g. 0.5); inference passes
+            1.0 (always hide z). Ignored for Approach B (encoder has no
+            redshift). Default 0.0 = z always visible (no dropout).
         rng: optional `torch.Generator` for reproducible masking.
 
     Returns:
@@ -65,6 +76,8 @@ def tokenize_and_build(
         raise ValueError(f"approach must be 'a' or 'b', got {approach!r}")
     if not 0.0 <= encoder_mask_ratio <= 1.0:
         raise ValueError(f"encoder_mask_ratio must be in [0, 1], got {encoder_mask_ratio}")
+    if not 0.0 <= redshift_mask_ratio <= 1.0:
+        raise ValueError(f"redshift_mask_ratio must be in [0, 1], got {redshift_mask_ratio}")
 
     flux = raw_batch["flux"].to(device, non_blocking=True)
     ivar = raw_batch["ivar"].to(device, non_blocking=True)
@@ -103,8 +116,19 @@ def tokenize_and_build(
             spec_tokens,
         )
 
+    # Redshift conditioning dropout (Approach A only): replace the encoder's
+    # redshift token with REDMASK so the model must infer z from the spectrum
+    # rather than copy it. decoder_input/target keep the true rz below.
+    rz_enc = rz
+    if approach == "a" and redshift_mask_ratio > 0.0:
+        if rng is None:
+            rmask = torch.rand(B, 1, device=device) < redshift_mask_ratio
+        else:
+            rmask = torch.rand(B, 1, device=device, generator=rng) < redshift_mask_ratio
+        rz_enc = torch.where(rmask, torch.full_like(rz, REDMASK_TOKEN), rz)
+
     if approach == "a":
-        encoder_input = torch.cat([sos, rz, spec_tokens_enc, eos], dim=1)
+        encoder_input = torch.cat([sos, rz_enc, spec_tokens_enc, eos], dim=1)
     else:  # 'b'
         encoder_input = torch.cat([sos, spec_tokens_enc, eos], dim=1)
 

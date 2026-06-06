@@ -910,3 +910,94 @@ We have everything we need:
 
 No more training runs needed for the report. Move to writeup, plots,
 and ablation discussion.
+
+---
+
+## 2026-06-06: Redshift copy mechanism — root cause + fix (conditioning dropout)
+
+### The bug behind "A's success is real"
+
+The 2026-05-11 conclusion ("AR confirms encoder genuinely encodes
+redshift, not just copy") was itself confounded. `encoder_mask_ratio`
+masks **only spectrum tokens** — it never touched the redshift token at
+encoder position 1. So in Approach A the true redshift was present in
+the encoder during **both** teacher-forced eval **and** AR eval. The
+decoder's position-0 redshift prediction could be satisfied by a trivial
+shift-and-copy from encoder position 1 (`[SOS, z, s1..sN, EOS]` →
+predict `z` at decoder position 0), independent of the spectrum. The
+sharp z_acc phase transition is the signature of an attention pattern
+being discovered, not of redshift being learned from spectral features.
+Approach A's reported z_acc is therefore not a genuine
+redshift-from-spectrum number.
+
+### Fix: redshift conditioning dropout (CFG / 4M-style)
+
+Goal (per project owner): the model must learn redshift genuinely —
+predict z **without seeing it sometimes during training and always at
+inference**.
+
+AION-1 reference (AION Paper.pdf §5, 4M masked modeling): every modality
+token, redshift included, is randomly assigned to the observed set (fed
+to the encoder) or the target set (predicted) per example; decoder query
+tokens get only modality+position embeddings, never the value. The
+lesson: never unconditionally show redshift to the encoder.
+
+Minimal faithful adaptation for our teacher-forced encoder-decoder
+(spectrum reconstruction is working well and is left untouched):
+**replace the encoder's redshift token with the already-reserved
+`REDMASK_TOKEN` (id 4) with probability `redshift_mask_ratio`.**
+`decoder_input`/`target` keep the true redshift token, so position-0 is
+still supervised against the real value; the position-0 prediction can't
+see the teacher-forced z (causal mask), so the only path to it is
+cross-attention into the (now sometimes-masked) encoder. When z is
+REDMASK'd, copying is impossible → the model must infer z from the
+spectrum.
+
+- **Training**: `redshift_mask_ratio = 0.5` (z hidden half the time;
+  half the batches still let the model learn to *use* z for spectrum —
+  the cross-modal benefit, like AION's observed-z case).
+- **Eval / inference**: ratio `1.0` (z always hidden). This is now the
+  honest redshift-from-spectrum metric. Release inference paths default
+  to 1.0; spectrum still reconstructs because `generate()` emits z at
+  position 0 first, then conditions spectrum on its own generated z.
+- Distinct from spectrum's `MASK_TOKEN` (3) so the model can tell
+  "redshift hidden" from "spectrum pixel hidden". No-op for Approach B.
+
+### Why REDMASK over deleting the token (≈ Approach B)
+
+Keeps encoder length and positional alignment constant, so the working
+architecture is unchanged; gives a single model that handles both
+"z given" and "z hidden"; makes the held-out signal explicit. Approach B
+(redshift entirely absent from the encoder) stayed dead across 4 configs;
+conditioning dropout is the better-posed version of the same idea.
+
+### Files changed
+
+- `src/training/sequences.py` — `tokenize_and_build` gains
+  `redshift_mask_ratio`; REDMASK applied to the encoder redshift token
+  only (Approach A), `rng`-reproducible.
+- `src/training/eval.py` — `evaluate` / `evaluate_ar` thread the param.
+- `nersc/train_transformer.py` — `--redshift-mask-ratio` (default 0.5);
+  train loop uses it; val/AR eval forced to 1.0 (honest z-hidden); added
+  a z-given AR comparison (`val_ar/redshift_acc_zgiven`) to expose any
+  residual copy path; ratio recorded in checkpoint/artifact metadata.
+- `scripts/train.py` + `src/datasets/tokenized_dataset.py` — dataset path
+  gains `redshift_mask_ratio` (per-item REDMASK at encoder index 1); val
+  set forced to 1.0.
+- `src/inference/release.py` — `predict_teacher_forced` /
+  `predict_autoregressive` default `redshift_mask_ratio=1.0`.
+- `tests/test_training_helpers.py` — `TestRedshiftMasking` (REDMASK at
+  ratio 1.0, untouched at 0.0, rng reproducibility, decoder/target
+  untouched, Approach B no-op). Also fixed the stale `FakeZTok` stub to
+  match the batched `RedshiftTokenizer` API (`.device` + tensor
+  `.encode`), which had silently broken `TestEncoderMasking` /
+  `TestEvaluateAR`.
+
+### What to re-measure (requires retraining A)
+
+The released checkpoint was trained with the copy path open. Retrain
+Approach A with `--redshift-mask-ratio 0.5` and compare AR z_acc with
+z **hidden** (ratio 1.0, the honest number) vs z **given** (0.0). The
+gap is the size of the old copy artifact; the hidden-z curve should rise
+smoothly without the sharp phase transition. Spectrum metrics
+(`spectrum_acc` / `masked_spec_acc`) must not regress.

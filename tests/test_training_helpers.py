@@ -29,6 +29,7 @@ sys.path.insert(0, str(REPO))
 from src.models.transformer import (
     EOS_TOKEN,
     MASK_TOKEN,
+    REDMASK_TOKEN,
     REDSHIFT_TOKEN_OFFSET,
     SOS_TOKEN,
     SPECTRUM_TOKEN_OFFSET,
@@ -62,9 +63,14 @@ class FakeSpecTok:
 
 
 class FakeZTok:
-    """Maps any float z -> deterministic bin."""
+    """Maps z -> deterministic bin. Mirrors RedshiftTokenizer's batched API:
+    has a `.device` and `.encode` accepts a (B,) tensor, returns (B,) indices."""
+
+    device = torch.device("cpu")
 
     def encode(self, z):
+        if isinstance(z, torch.Tensor):
+            return (z.abs() * 10).long() % 16
         return int(abs(z) * 10) % 16
 
 
@@ -147,6 +153,78 @@ class TestEncoderMasking:
         assert (enc[:, 0] == SOS_TOKEN).all()
         assert (enc[:, 1:1 + 8] == MASK_TOKEN).all()
         assert (enc[:, -1] == EOS_TOKEN).all()
+
+
+# ---------------------------------------------------------------------------
+# Redshift conditioning dropout — REDMASK in the encoder
+# ---------------------------------------------------------------------------
+
+class TestRedshiftMasking:
+    def test_full_ratio_hides_redshift_from_encoder(self):
+        # Approach A encoder: [SOS, redshift, s1..sN, EOS]. With ratio 1.0
+        # the redshift position (index 1) becomes REDMASK, but decoder_input
+        # and target keep the true redshift token.
+        spec, z = FakeSpecTok(n_tokens=8), FakeZTok()
+        raw = _make_raw_batch(B=2)
+        enc, dec, tgt, _ = tokenize_and_build(
+            raw, spec, z, "a", torch.device("cpu"), redshift_mask_ratio=1.0
+        )
+        assert (enc[:, 1] == REDMASK_TOKEN).all()
+        # decoder_input position 1 and target position 0 are the true z token
+        assert (dec[:, 1] >= REDSHIFT_TOKEN_OFFSET).all()
+        assert (tgt[:, 0] >= REDSHIFT_TOKEN_OFFSET).all()
+        # SOS / EOS intact
+        assert (enc[:, 0] == SOS_TOKEN).all()
+        assert (enc[:, -1] == EOS_TOKEN).all()
+
+    def test_zero_ratio_keeps_redshift_visible(self):
+        spec, z = FakeSpecTok(n_tokens=8), FakeZTok()
+        raw = _make_raw_batch(B=2)
+        enc, _, _, _ = tokenize_and_build(
+            raw, spec, z, "a", torch.device("cpu"), redshift_mask_ratio=0.0
+        )
+        # Encoder position 1 is the true redshift token, never REDMASK.
+        assert (enc[:, 1] >= REDSHIFT_TOKEN_OFFSET).all()
+        assert (enc == REDMASK_TOKEN).sum().item() == 0
+
+    def test_reproducible_with_rng(self):
+        spec, z = FakeSpecTok(n_tokens=8), FakeZTok()
+        raw = _make_raw_batch(B=8)
+        g1 = torch.Generator().manual_seed(123)
+        enc1, _, _, _ = tokenize_and_build(
+            raw, spec, z, "a", torch.device("cpu"),
+            redshift_mask_ratio=0.5, rng=g1,
+        )
+        g2 = torch.Generator().manual_seed(123)
+        enc2, _, _, _ = tokenize_and_build(
+            raw, spec, z, "a", torch.device("cpu"),
+            redshift_mask_ratio=0.5, rng=g2,
+        )
+        assert torch.equal(enc1[:, 1], enc2[:, 1])
+
+    def test_approach_b_ignores_redshift_mask(self):
+        # Approach B has no redshift in the encoder; the ratio is a no-op
+        # and must not introduce a REDMASK token.
+        spec, z = FakeSpecTok(n_tokens=8), FakeZTok()
+        raw = _make_raw_batch(B=2)
+        enc, _, _, _ = tokenize_and_build(
+            raw, spec, z, "b", torch.device("cpu"), redshift_mask_ratio=1.0
+        )
+        assert (enc == REDMASK_TOKEN).sum().item() == 0
+
+    def test_does_not_touch_decoder_or_target(self):
+        spec, z = FakeSpecTok(), FakeZTok()
+        raw = _make_raw_batch()
+        torch.manual_seed(0)
+        _, dec_a, tgt_a, _ = tokenize_and_build(
+            raw, spec, z, "a", torch.device("cpu"), redshift_mask_ratio=0.0
+        )
+        torch.manual_seed(0)
+        _, dec_b, tgt_b, _ = tokenize_and_build(
+            raw, spec, z, "a", torch.device("cpu"), redshift_mask_ratio=1.0
+        )
+        assert torch.equal(dec_a, dec_b)
+        assert torch.equal(tgt_a, tgt_b)
 
 
 # ---------------------------------------------------------------------------

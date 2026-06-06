@@ -43,12 +43,14 @@ def evaluate(
     amp: bool,
     redshift_weight: float,
     encoder_mask_ratio: float = 0.0,
+    redshift_mask_ratio: float = 0.0,
     max_batches: int = 50,
 ) -> Dict[str, float]:
     """Teacher-forced eval. Returns a dict of averaged metrics over up to
     `max_batches` batches from `loader`.
 
-    Adds `masked_spec_acc` when `encoder_mask_ratio > 0`.
+    Adds `masked_spec_acc` when `encoder_mask_ratio > 0`. Pass
+    `redshift_mask_ratio=1.0` to evaluate the honest (z-hidden) regime.
     """
     model.eval()
     losses = 0.0
@@ -65,6 +67,7 @@ def evaluate(
         enc, dec, tgt, mask_pos = tokenize_and_build(
             raw, spec_tok, z_tok, approach, device,
             encoder_mask_ratio=encoder_mask_ratio,
+            redshift_mask_ratio=redshift_mask_ratio,
         )
         with torch.amp.autocast("cuda", enabled=amp):
             logits, loss = model(enc, dec, targets=tgt, redshift_weight=redshift_weight)
@@ -110,11 +113,15 @@ def evaluate_ar(
     device: torch.device,
     max_batches: int = 4,
     encoder_mask_ratio: float = 0.0,
+    redshift_mask_ratio: float = 0.0,
 ) -> Dict[str, float]:
     """Autoregressive eval — no teacher forcing.
 
     For each sample, generate `T+1` tokens starting from SOS and compare
     against the target. Slow; cap with `max_batches`.
+
+    Pass `redshift_mask_ratio=1.0` for the honest redshift-from-spectrum
+    accuracy (z hidden from the encoder, as at inference time).
 
     Returns:
         {'ar_redshift_acc', 'ar_spectrum_acc', 'n_samples'}
@@ -134,6 +141,7 @@ def evaluate_ar(
         enc, _dec_unused, tgt, _ = tokenize_and_build(
             raw, spec_tok, z_tok, approach, device,
             encoder_mask_ratio=encoder_mask_ratio,
+            redshift_mask_ratio=redshift_mask_ratio,
         )
         B, L_dec = tgt.shape
         # generate L_dec tokens; SpectrumTransformer.generate returns

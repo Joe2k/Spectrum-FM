@@ -48,6 +48,12 @@ def parse_args():
                         help='Directory with coadd and redrock FITS files')
     parser.add_argument('--approach', type=str, choices=['a', 'b'], default='a',
                         help='Training approach: a=joint, b=masked')
+    parser.add_argument('--redshift_mask_ratio', type=float, default=0.5,
+                        help='Per-sample probability of hiding the redshift '
+                             'token from the encoder with [REDMASK] (Approach A '
+                             'only). Redshift conditioning dropout: forces '
+                             'predicting z from the spectrum instead of copying. '
+                             '0.0 disables; val always uses 1.0 (z hidden).')
     
     # Model
     parser.add_argument('--d_model', type=int, default=768)
@@ -270,13 +276,17 @@ def main():
         redshift_tokenizer,
         approach=args.approach,
         device=device,
+        redshift_mask_ratio=args.redshift_mask_ratio,
     )
+    # Validation always hides z from the encoder so redshift accuracy reflects
+    # the honest, inference-time predict-from-spectrum case.
     val_dataset = TokenizedSpectrumDataset(
         val_spectra,
         spectrum_tokenizer,
         redshift_tokenizer,
         approach=args.approach,
         device=device,
+        redshift_mask_ratio=1.0 if args.approach == 'a' else 0.0,
     )
     
     train_loader = DataLoader(
