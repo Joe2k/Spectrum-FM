@@ -72,6 +72,13 @@ def parse_args():
     p.add_argument("--manifest", type=Path, required=True)
     p.add_argument("--tokenizer-ckpt", type=Path, required=True,
                    help="Pretrained SpectrumTokenizer .pt (best.pt or final.pt)")
+    p.add_argument("--resume", type=Path, default=None,
+                   help="Resume from a full-state checkpoint (best.pt or "
+                        "final.pt): restores model, optimizer, scaler, step "
+                        "and best_val so training continues where it stopped. "
+                        "Reuse the SAME --run-name to keep the same run dir. "
+                        "Note: periodic step_*.pt are model-only and cannot "
+                        "restore optimizer state.")
     p.add_argument("--max-spectra", type=int, default=None)
     p.add_argument("--healpix-holdout-frac", type=float, default=0.05,
                    help="Fraction of HEALPIX FILES (not rows) to reserve "
@@ -273,6 +280,24 @@ def main():
     optim = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
 
+    # Optional resume: restore model/optim/scaler/step/best_val from a
+    # full-state checkpoint. Every rank loads the same file, keeping DDP
+    # replicas identical.
+    resume_step = 0
+    resume_best = float("inf")
+    if args.resume is not None:
+        rckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        (model.module if is_distributed else model).load_state_dict(rckpt["model"])
+        if "optim" in rckpt:
+            optim.load_state_dict(rckpt["optim"])
+        if "scaler" in rckpt:
+            scaler.load_state_dict(rckpt["scaler"])
+        resume_step = int(rckpt.get("step", 0))
+        resume_best = float(rckpt.get("val_loss", float("inf")))
+        if rank == 0:
+            print(f"[resume] {args.resume} -> step={resume_step} "
+                  f"best_val={resume_best:.4f}")
+
     # Wandb init — rank 0 only
     wandb_run = None
     if rank == 0:
@@ -294,9 +319,9 @@ def main():
             out_dir=wandb_dir,
         )
 
-    step = 0
+    step = resume_step
     epoch = 0
-    best_val = float("inf")
+    best_val = resume_best
     t0 = time.time()
     if train_sampler is not None:
         train_sampler.set_epoch(epoch)

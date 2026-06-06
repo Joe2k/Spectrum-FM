@@ -1001,3 +1001,19 @@ z **hidden** (ratio 1.0, the honest number) vs z **given** (0.0). The
 gap is the size of the old copy artifact; the hidden-z curve should rise
 smoothly without the sharp phase transition. Spectrum metrics
 (`spectrum_acc` / `masked_spec_acc`) must not regress.
+
+---
+
+## 2026-06-06: Add `--resume` to nersc/train_transformer.py
+
+Training had no resume path — `step` started at 0 with a fresh optimizer,
+and only the tokenizer was loaded. `best.pt` already saves full state
+(`model`, `optim`, `scaler`, `step`, `val_loss`); it just wasn't read
+back. Added `--resume PATH`: after the optimizer/scaler are built, load
+the checkpoint on every rank (so DDP replicas stay identical), restore
+model/optim/scaler and set `step`/`best_val` from it. The loop is
+`while step < args.steps`, so resuming continues to the cap. Reuse the
+same `--run-name` to keep the run dir. Periodic `step_*.pt` are
+model-only and can't restore optimizer state — resume from `best.pt`/
+`final.pt`. Note: a resumed job starts a fresh W&B run unless
+`WANDB_RESUME`/run-id continuation is configured.
