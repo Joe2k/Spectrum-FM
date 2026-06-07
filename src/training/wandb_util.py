@@ -26,6 +26,8 @@ def init_wandb(
     config: dict,
     out_dir: Path,
     dotenv_path: Optional[Path] = None,
+    run_id: Optional[str] = None,
+    resume: Optional[str] = None,
 ):
     """Initialize a wandb run (or return None if disabled).
 
@@ -37,6 +39,12 @@ def init_wandb(
         out_dir: directory for wandb's local files (relative or absolute).
             Typically `$SCRATCH/deepsrch/wandb/<run>`.
         dotenv_path: path to .env (default: search from cwd upward).
+        run_id: existing wandb run id to continue. When set (together with
+            `resume`), metrics append to that run instead of starting a new
+            one. Pass the id saved in the training checkpoint.
+        resume: wandb resume policy ("allow" / "must" / "never"). Only
+            forwarded when `run_id` is also set. Use "allow" to continue the
+            run if it exists, else create it.
 
     Returns:
         wandb Run object, or None if mode == "disabled" or init fails.
@@ -71,15 +79,21 @@ def init_wandb(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    init_kwargs = dict(
+        project=project,
+        name=run_name,
+        mode=mode,
+        config=config,
+        dir=str(out_dir),
+    )
+    if run_id:
+        init_kwargs["id"] = run_id
+        init_kwargs["resume"] = resume or "allow"
+
     try:
-        run = wandb.init(
-            project=project,
-            name=run_name,
-            mode=mode,
-            config=config,
-            dir=str(out_dir),
-        )
-        print(f"[wandb] mode={mode} project={project} name={run_name}")
+        run = wandb.init(**init_kwargs)
+        suffix = f" resume={init_kwargs['resume']} id={run_id}" if run_id else ""
+        print(f"[wandb] mode={mode} project={project} name={run_name}{suffix}")
         if hasattr(run, "url") and run.url:
             print(f"[wandb] url: {run.url}")
         return run

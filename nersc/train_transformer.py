@@ -129,6 +129,10 @@ def parse_args():
     p.add_argument("--wandb-mode", choices=["online", "offline", "disabled"],
                    default="online")
     p.add_argument("--wandb-project", type=str, default="redshifty")
+    p.add_argument("--wandb-run-id", type=str, default=None,
+                   help="Continue an existing W&B run by id (resume='allow'). "
+                        "Overrides the id saved in --resume's checkpoint. "
+                        "Leave unset to auto-continue the checkpoint's run.")
     p.add_argument("--push-wandb-artifact", action="store_true", default=True,
                    help="Upload a slim model-only best.pt to wandb as an Artifact "
                         "on each best update (and final). Disable with --no-push-wandb-artifact.")
@@ -285,6 +289,7 @@ def main():
     # replicas identical.
     resume_step = 0
     resume_best = float("inf")
+    resume_wandb_id = None
     if args.resume is not None:
         rckpt = torch.load(args.resume, map_location=device, weights_only=False)
         (model.module if is_distributed else model).load_state_dict(rckpt["model"])
@@ -294,9 +299,14 @@ def main():
             scaler.load_state_dict(rckpt["scaler"])
         resume_step = int(rckpt.get("step", 0))
         resume_best = float(rckpt.get("val_loss", float("inf")))
+        resume_wandb_id = rckpt.get("wandb_run_id")
         if rank == 0:
             print(f"[resume] {args.resume} -> step={resume_step} "
-                  f"best_val={resume_best:.4f}")
+                  f"best_val={resume_best:.4f} wandb_id={resume_wandb_id}")
+
+    # Continue the same W&B run on resume: explicit --wandb-run-id wins,
+    # else the id saved in the checkpoint.
+    wandb_run_id = args.wandb_run_id or resume_wandb_id
 
     # Wandb init — rank 0 only
     wandb_run = None
@@ -317,7 +327,12 @@ def main():
             run_name=args.run_name,
             config=wandb_config,
             out_dir=wandb_dir,
+            run_id=wandb_run_id,
+            resume="allow" if wandb_run_id else None,
         )
+
+    # W&B run id to persist in checkpoints so later resumes continue this run.
+    wandb_id_to_save = wandb_run.id if wandb_run is not None else wandb_run_id
 
     step = resume_step
     epoch = 0
@@ -431,6 +446,7 @@ def main():
                     "approach": args.approach,
                     "encoder_mask_ratio": args.encoder_mask_ratio,
                     "redshift_mask_ratio": args.redshift_mask_ratio,
+                    "wandb_run_id": wandb_id_to_save,
                 }, p)
                 print(f"  *** new best val_loss={best_val:.4f} -> {p}")
                 if args.cfs_out is not None:
@@ -507,6 +523,7 @@ def main():
             "approach": args.approach,
             "encoder_mask_ratio": args.encoder_mask_ratio,
             "redshift_mask_ratio": args.redshift_mask_ratio,
+            "wandb_run_id": wandb_id_to_save,
         }, p)
         print(f"[done] final -> {p}  best_val_loss={best_val:.4f}")
         if args.cfs_out is not None:

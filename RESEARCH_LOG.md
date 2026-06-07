@@ -1015,5 +1015,16 @@ model/optim/scaler and set `step`/`best_val` from it. The loop is
 `while step < args.steps`, so resuming continues to the cap. Reuse the
 same `--run-name` to keep the run dir. Periodic `step_*.pt` are
 model-only and can't restore optimizer state — resume from `best.pt`/
-`final.pt`. Note: a resumed job starts a fresh W&B run unless
-`WANDB_RESUME`/run-id continuation is configured.
+`final.pt`.
+
+## 2026-06-06: W&B run continuation on resume
+
+Resumed jobs previously started a fresh W&B run, splitting one training
+trajectory across multiple charts. Added run continuation:
+`init_wandb` gains `run_id` + `resume` (forwards `id` and
+`resume="allow"` to `wandb.init`); `train_transformer.py` saves the live
+`wandb_run.id` into `best.pt`/`final.pt`, and on `--resume` reads it back
+(or takes an explicit `--wandb-run-id` override) so metrics append to the
+original run. The id is captured on all ranks (`None` off rank 0) so the
+checkpoint-save code is rank-safe. Tests: `run_id` forwards
+`resume="allow"`; absent id omits both kwargs.

@@ -393,6 +393,53 @@ class TestWandbInit:
         )
         assert result is None
 
+    def test_run_id_forwards_resume(self, tmp_path, monkeypatch):
+        # When run_id is set, init_wandb forwards id + resume to wandb.init.
+        monkeypatch.setenv("WANDB_API_KEY", "dummy-key")
+        captured = {}
+
+        def fake_init(**kw):
+            captured.update(kw)
+            class _R:
+                url = None
+                id = kw.get("id")
+            return _R()
+
+        import types
+        wb = types.ModuleType("wandb")
+        wb.init = fake_init
+        monkeypatch.setitem(sys.modules, "wandb", wb)
+
+        init_wandb(
+            mode="online", project="dummy", run_name="r", config={},
+            out_dir=tmp_path, run_id="abc123",
+        )
+        assert captured["id"] == "abc123"
+        assert captured["resume"] == "allow"  # defaulted when run_id set
+
+    def test_no_run_id_omits_resume(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("WANDB_API_KEY", "dummy-key")
+        captured = {}
+
+        def fake_init(**kw):
+            captured.update(kw)
+            class _R:
+                url = None
+                id = "fresh"
+            return _R()
+
+        import types
+        wb = types.ModuleType("wandb")
+        wb.init = fake_init
+        monkeypatch.setitem(sys.modules, "wandb", wb)
+
+        init_wandb(
+            mode="online", project="dummy", run_name="r", config={},
+            out_dir=tmp_path,
+        )
+        assert "id" not in captured
+        assert "resume" not in captured
+
     def test_mode_env_forced_when_online(self, tmp_path, monkeypatch):
         # Pre-set WANDB_MODE to "offline" (mimicking NERSC) and verify
         # init_wandb sets it back to "online" before init.
