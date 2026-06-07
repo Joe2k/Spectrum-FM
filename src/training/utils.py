@@ -57,6 +57,16 @@ def compute_metrics(logits: torch.Tensor, target: torch.Tensor) -> Dict[str, flo
     pos0_mask = mask[:, 0]
     pos0_correct = (pred[:, 0] == target[:, 0]).float() * pos0_mask.float()
     pos0_acc = pos0_correct.sum() / pos0_mask.sum() if pos0_mask.sum() > 0 else 0.0
+
+    # Redshift "right neighborhood" accuracy: predicted bin within +/-2 of
+    # the true bin. Redshift is the one ordinal axis (adjacent bins = adjacent
+    # z), so this exposes near-misses that exact-bin accuracy hides.
+    pos0_within2 = (
+        ((pred[:, 0] - target[:, 0]).abs() <= 2).float() * pos0_mask.float()
+    )
+    pos0_within2_acc = (
+        pos0_within2.sum() / pos0_mask.sum() if pos0_mask.sum() > 0 else 0.0
+    )
     
     # Position 1+ accuracy (spectrum tokens)
     if target.shape[1] > 1:
@@ -69,6 +79,7 @@ def compute_metrics(logits: torch.Tensor, target: torch.Tensor) -> Dict[str, flo
     return {
         'overall_acc': overall_acc.item(),
         'redshift_acc': pos0_acc.item(),
+        'redshift_acc_within2': pos0_within2_acc.item() if hasattr(pos0_within2_acc, "item") else pos0_within2_acc,
         'spectrum_acc': spec_acc.item(),
     }
 

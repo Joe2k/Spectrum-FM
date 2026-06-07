@@ -1028,3 +1028,46 @@ trajectory across multiple charts. Added run continuation:
 original run. The id is captured on all ranks (`None` off rank 0) so the
 checkpoint-save code is rank-safe. Tests: `run_id` forwards
 `resume="allow"`; absent id omits both kwargs.
+
+## 2026-06-06: Gaussian soft labels for the redshift loss (v10 lever)
+
+### Why
+
+v9 (redshift conditioning dropout, honest z-hidden eval) exposed that the
+model does NOT learn redshift from spectrum: honest `val/redshift_acc`
+flat ~2–4% (random) across 27k steps, `val/loss_redshift` stuck ~4.3,
+while train redshift overfits (copy + memorize). Diagnosis: redshift is a
+256-way softmax over CDF→Gaussian→FSQ bins where **adjacent bins are
+adjacent z**, but cross-entropy treats them as unrelated classes — no
+partial credit, no gradient toward the right neighborhood, so the model
+never climbs. Secondary finding: at `redshift_loss_weight=1.0` the
+per-segment loss weights one redshift token equal to all 272 spectrum
+tokens, so a stuck redshift term (~70% of val loss) starved spectrum —
+v9's lower `spectrum_acc` (0.44 vs v8 0.73) is mostly this plus the loss
+of unmasked-copy inflation; the honest `masked_spec_acc` barely changed
+(0.455 → 0.437).
+
+### Change
+
+`SpectrumTransformer.forward` gains `redshift_soft_sigma` (default 0.0 =
+unchanged hard CE). When >0, the position-0 loss is cross-entropy against
+a Gaussian over the redshift bins centered on the true bin, std = sigma
+bins (`_redshift_soft_ce`). Spectrum tokens keep hard CE (LFQ codes are
+not ordinal). Chosen over a continuous regression head because it is
+confined to the loss — `generate()`, AR eval, inference API, and the
+token vocab are untouched. Added `redshift_acc_within2` (±2-bin "right
+neighborhood") to `compute_metrics`, surfaced in train + val logs.
+Threaded `--redshift-soft-sigma` through `nersc/train_transformer.py`
+(train + honest val) and recorded it in checkpoints/artifact metadata.
+
+### v10 plan (clean A/B vs v9)
+
+Change ONLY the redshift loss: `--redshift-soft-sigma 1.5`, everything
+else = v9 (`encoder_mask_ratio 0.5`, `redshift_mask_ratio 0.5`,
+`redshift_loss_weight 1.0`). If honest `val_ar/ar_redshift_acc` /
+`within2` start climbing, the objective was the bottleneck and the next
+lever is rebalancing `redshift_loss_weight` so the now-descending
+redshift term stops starving spectrum. If still flat, escalate to the
+encoder-side z head and/or lower `encoder_mask_ratio`. Tests:
+soft-CE partial credit (closer prediction → lower loss), forward runs &
+differs from hard, within2 metric.

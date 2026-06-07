@@ -383,6 +383,7 @@ class SpectrumTransformer(nn.Module):
         decoder_mask: Optional[torch.Tensor] = None,
         targets: Optional[torch.Tensor] = None,
         redshift_weight: float = 1.0,
+        redshift_soft_sigma: float = 0.0,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Full forward pass.
 
@@ -400,6 +401,14 @@ class SpectrumTransformer(nn.Module):
                 footing. Set higher (e.g. 50) to force the model to learn
                 the redshift token despite spectrum tokens dominating the
                 position count.
+            redshift_soft_sigma: if > 0, the position-0 (redshift) loss uses
+                soft labels — cross-entropy against a Gaussian over the
+                redshift bins centered on the true bin, with this standard
+                deviation (in bins). Gives partial credit / an ordinal
+                gradient toward the right neighborhood, instead of treating
+                all 256 bins as unrelated classes. 0.0 (default) keeps the
+                original hard cross-entropy. Spectrum tokens always use hard
+                CE (LFQ codes are not ordinal).
 
         Returns:
             logits: (B, L_dec, vocab_size)
@@ -425,15 +434,59 @@ class SpectrumTransformer(nn.Module):
             ).view(B, L)
             valid = (targets != -100).float()
             n_red = valid[:, 0].sum().clamp(min=1.0)
+
+            # Redshift (position 0): soft Gaussian labels if requested, else
+            # the hard cross-entropy already in `per_token[:, 0]`.
+            if redshift_soft_sigma and redshift_soft_sigma > 0.0:
+                red_per = self._redshift_soft_ce(
+                    logits[:, 0, :], targets[:, 0], redshift_soft_sigma
+                )
+            else:
+                red_per = per_token[:, 0]
+            loss_red = (red_per * valid[:, 0]).sum() / n_red
+
             if L > 1:
                 n_spec = valid[:, 1:].sum().clamp(min=1.0)
-                loss_red = (per_token[:, 0] * valid[:, 0]).sum() / n_red
                 loss_spec = (per_token[:, 1:] * valid[:, 1:]).sum() / n_spec
                 loss = redshift_weight * loss_red + loss_spec
             else:
-                loss = (per_token[:, 0] * valid[:, 0]).sum() / n_red
+                loss = redshift_weight * loss_red
 
         return logits, loss
+
+    def _redshift_soft_ce(
+        self,
+        red_logits: torch.Tensor,
+        red_targets: torch.Tensor,
+        sigma: float,
+    ) -> torch.Tensor:
+        """Per-sample cross-entropy of the redshift position against a
+        Gaussian soft label centered on the true bin.
+
+        Args:
+            red_logits: (B, V) logits at the redshift (position-0) slot.
+            red_targets: (B,) target token ids (REDSHIFT_TOKEN_OFFSET + bin),
+                or -100 for padded rows (handled by the caller's `valid` mask;
+                clamped here so the gather is in-range).
+            sigma: Gaussian std in bins.
+
+        Returns:
+            (B,) per-sample CE. Rows with padded targets return a finite
+            (meaningless) value that the caller zeroes via the valid mask.
+        """
+        B, V = red_logits.shape
+        n_bins = V - REDSHIFT_TOKEN_OFFSET  # redshift sub-vocab width (256)
+        true_bin = (red_targets - REDSHIFT_TOKEN_OFFSET).clamp(0, n_bins - 1).float()  # (B,)
+        bins = torch.arange(n_bins, device=red_logits.device, dtype=red_logits.dtype)
+        # (B, n_bins) Gaussian over bin index, normalized per row.
+        g = torch.exp(-0.5 * ((bins.unsqueeze(0) - true_bin.unsqueeze(1)) / sigma) ** 2)
+        g = g / g.sum(dim=1, keepdim=True).clamp(min=1e-8)
+        # Embed into the full-vocab target distribution (zero outside the
+        # redshift bins) and take CE against the model's log-probs.
+        soft = red_logits.new_zeros(B, V)
+        soft[:, REDSHIFT_TOKEN_OFFSET:REDSHIFT_TOKEN_OFFSET + n_bins] = g
+        log_probs = F.log_softmax(red_logits, dim=-1)
+        return -(soft * log_probs).sum(dim=-1)
     
     @torch.no_grad()
     def generate(

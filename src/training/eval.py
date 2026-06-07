@@ -44,6 +44,7 @@ def evaluate(
     redshift_weight: float,
     encoder_mask_ratio: float = 0.0,
     redshift_mask_ratio: float = 0.0,
+    redshift_soft_sigma: float = 0.0,
     max_batches: int = 50,
 ) -> Dict[str, float]:
     """Teacher-forced eval. Returns a dict of averaged metrics over up to
@@ -54,7 +55,8 @@ def evaluate(
     """
     model.eval()
     losses = 0.0
-    metrics_accum = {"overall_acc": 0.0, "redshift_acc": 0.0, "spectrum_acc": 0.0}
+    metrics_accum = {"overall_acc": 0.0, "redshift_acc": 0.0,
+                     "redshift_acc_within2": 0.0, "spectrum_acc": 0.0}
     breakdown_accum = {"loss_redshift": 0.0, "loss_spectrum": 0.0, "loss_total": 0.0}
     masked_acc_accum = 0.0
     masked_n_total = 0
@@ -70,7 +72,8 @@ def evaluate(
             redshift_mask_ratio=redshift_mask_ratio,
         )
         with torch.amp.autocast("cuda", enabled=amp):
-            logits, loss = model(enc, dec, targets=tgt, redshift_weight=redshift_weight)
+            logits, loss = model(enc, dec, targets=tgt, redshift_weight=redshift_weight,
+                                 redshift_soft_sigma=redshift_soft_sigma)
         losses += float(loss.item())
         m = compute_metrics(logits, tgt)
         for k in metrics_accum:

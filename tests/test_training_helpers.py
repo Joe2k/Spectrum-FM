@@ -39,7 +39,7 @@ from src.models.transformer import (
 from src.training.data_split import split_records_by_healpix
 from src.training.eval import evaluate_ar
 from src.training.sequences import tokenize_and_build
-from src.training.utils import compute_masked_metrics
+from src.training.utils import compute_masked_metrics, compute_metrics
 from src.training.wandb_util import init_wandb, log_model_artifact
 
 
@@ -348,6 +348,54 @@ class TestRedshiftWeight:
         logits, loss = model(enc, dec, redshift_weight=999.0)
         assert loss is None
         assert logits.shape == (1, 4, TOTAL_VOCAB_SIZE)
+
+
+class TestRedshiftSoftLabels:
+    def _model(self):
+        return SpectrumTransformer(
+            vocab_size=TOTAL_VOCAB_SIZE,
+            d_model=32, n_encoder_layers=1, n_decoder_layers=1,
+            n_heads=4, max_seq_len=64, dropout=0.0,
+        )
+
+    def test_partial_credit_closer_is_better(self):
+        # A prediction one bin off the truth should score a LOWER soft loss
+        # than one 50 bins off — the ordinal partial credit that hard CE lacks.
+        model = self._model()
+        V = TOTAL_VOCAB_SIZE
+        true_bin = 100
+        tgt = torch.tensor([REDSHIFT_TOKEN_OFFSET + true_bin])
+        near = torch.full((1, V), -10.0)
+        near[0, REDSHIFT_TOKEN_OFFSET + true_bin + 1] = 10.0
+        far = torch.full((1, V), -10.0)
+        far[0, REDSHIFT_TOKEN_OFFSET + true_bin + 50] = 10.0
+        l_near = model._redshift_soft_ce(near, tgt, sigma=1.5)
+        l_far = model._redshift_soft_ce(far, tgt, sigma=1.5)
+        assert l_near.item() < l_far.item()
+
+    def test_forward_soft_runs_and_differs_from_hard(self):
+        torch.manual_seed(0)
+        model = self._model()
+        enc = torch.randint(0, TOTAL_VOCAB_SIZE, (2, 10))
+        dec = torch.randint(0, TOTAL_VOCAB_SIZE, (2, 8))
+        # Position-0 target must be a real redshift bin for the soft path.
+        tgt = torch.randint(SPECTRUM_TOKEN_OFFSET, REDSHIFT_TOKEN_OFFSET, (2, 8))
+        tgt[:, 0] = REDSHIFT_TOKEN_OFFSET + 42
+        _, loss_hard = model(enc, dec, targets=tgt, redshift_soft_sigma=0.0)
+        _, loss_soft = model(enc, dec, targets=tgt, redshift_soft_sigma=1.5)
+        assert torch.isfinite(loss_soft)
+        assert not torch.allclose(loss_hard, loss_soft)
+
+    def test_within2_metric_present(self):
+        logits = torch.zeros(1, 3, TOTAL_VOCAB_SIZE)
+        target = torch.tensor([[REDSHIFT_TOKEN_OFFSET + 10,
+                                SPECTRUM_TOKEN_OFFSET, EOS_TOKEN]])
+        # Make the redshift argmax land 1 bin off: within2 should count it.
+        logits[0, 0, REDSHIFT_TOKEN_OFFSET + 11] = 5.0
+        m = compute_metrics(logits, target)
+        assert "redshift_acc_within2" in m
+        assert m["redshift_acc"] == pytest.approx(0.0)        # exact bin missed
+        assert m["redshift_acc_within2"] == pytest.approx(1.0)  # within +/-2 hit
 
 
 # ---------------------------------------------------------------------------

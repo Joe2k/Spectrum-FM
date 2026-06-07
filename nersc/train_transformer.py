@@ -120,6 +120,12 @@ def parse_args():
                         "0.0 disables (z always visible = copy path open); "
                         "0.5 = z hidden half the time. Eval/inference always "
                         "hide z (ratio 1.0).")
+    p.add_argument("--redshift-soft-sigma", type=float, default=0.0,
+                   help="If >0, the redshift (position-0) loss uses Gaussian "
+                        "soft labels with this std (in bins) instead of hard "
+                        "256-way cross-entropy. Gives partial credit / an "
+                        "ordinal gradient toward the right z neighborhood. "
+                        "0.0 keeps hard CE; ~1.5 is a good starting point.")
     p.add_argument("--ar-eval-batches", type=int, default=4,
                    help="Number of batches to run through autoregressive "
                         "eval at end-of-run and on best checkpoint.")
@@ -367,7 +373,8 @@ def main():
         optim.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda", enabled=args.amp):
             logits, loss = model(enc, dec, targets=tgt,
-                                 redshift_weight=args.redshift_loss_weight)
+                                 redshift_weight=args.redshift_loss_weight,
+                                 redshift_soft_sigma=args.redshift_soft_sigma)
         scaler.scale(loss).backward()
         if args.grad_clip > 0:
             scaler.unscale_(optim)
@@ -407,6 +414,7 @@ def main():
                 "train/lr": msg["lr"],
                 "train/overall_acc": m["overall_acc"],
                 "train/redshift_acc": m["redshift_acc"],
+                "train/redshift_acc_within2": m["redshift_acc_within2"],
                 "train/spectrum_acc": m["spectrum_acc"],
                 "train/masked_spec_acc": mm["masked_spec_acc"],
                 "train/steps_per_sec": rate,
@@ -421,6 +429,7 @@ def main():
                 args.amp, args.redshift_loss_weight,
                 encoder_mask_ratio=args.encoder_mask_ratio,
                 redshift_mask_ratio=1.0,
+                redshift_soft_sigma=args.redshift_soft_sigma,
             )
             model.train()
             print(f"[val   {step:6d}] " + " ".join(f"{k}={v[k]:.4f}" for k in v))
@@ -446,6 +455,7 @@ def main():
                     "approach": args.approach,
                     "encoder_mask_ratio": args.encoder_mask_ratio,
                     "redshift_mask_ratio": args.redshift_mask_ratio,
+                    "redshift_soft_sigma": args.redshift_soft_sigma,
                     "wandb_run_id": wandb_id_to_save,
                 }, p)
                 print(f"  *** new best val_loss={best_val:.4f} -> {p}")
@@ -468,6 +478,7 @@ def main():
                             "approach": args.approach,
                             "encoder_mask_ratio": args.encoder_mask_ratio,
                             "redshift_mask_ratio": args.redshift_mask_ratio,
+                            "redshift_soft_sigma": args.redshift_soft_sigma,
                             "redshift_loss_weight": args.redshift_loss_weight,
                             "full_state": True,
                         },
@@ -523,6 +534,7 @@ def main():
             "approach": args.approach,
             "encoder_mask_ratio": args.encoder_mask_ratio,
             "redshift_mask_ratio": args.redshift_mask_ratio,
+            "redshift_soft_sigma": args.redshift_soft_sigma,
             "wandb_run_id": wandb_id_to_save,
         }, p)
         print(f"[done] final -> {p}  best_val_loss={best_val:.4f}")
