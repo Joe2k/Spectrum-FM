@@ -390,7 +390,11 @@ def main():
                       if mask_pos is not None else
                       {"masked_spec_acc": float("nan"), "n_masked": 0})
             dt = time.time() - t0
-            rate = (step + 1) / max(dt, 1e-6)
+            # Throughput of THIS process: steps since (re)start / elapsed.
+            # Use (step - resume_step) so a resume at a high absolute step
+            # doesn't inflate the rate by counting pre-resume steps over only
+            # this process's wall time.
+            rate = (step - resume_step + 1) / max(dt, 1e-6)
             msg = {
                 "kind": "train", "step": step, "lr": optim.param_groups[0]["lr"],
                 "loss": float(loss.item()),

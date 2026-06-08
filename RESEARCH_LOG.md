@@ -1134,3 +1134,13 @@ testing to see if they reach higher/faster.
   the 100k cap, bump `--steps` (e.g. 150k) — this run rewards more
   training. This v9 is the new primary Approach-A result and supersedes
   the v8 release model (whose redshift accuracy was the copy artifact).
+
+## 2026-06-08: Fix inflated train/steps_per_sec after resume
+
+`train/steps_per_sec` spiked to absurd values (e.g. 4–13 step/s vs the
+true ~1.4–1.7) right after each resume. Cause: `rate = (step + 1) / dt`
+used the **absolute** step count over only the **current process's**
+elapsed time (`t0` resets at process start), so a resume at step ~63k
+divided 63k by a few seconds. Cosmetic only — training/loss unaffected.
+Fixed to `rate = (step - resume_step + 1) / dt` (steps completed in this
+process). Non-resumed runs are unchanged (`resume_step = 0`).
