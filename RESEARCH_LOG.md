@@ -1071,3 +1071,66 @@ redshift term stops starving spectrum. If still flat, escalate to the
 encoder-side z head and/or lower `encoder_mask_ratio`. Tests:
 soft-CE partial credit (closer prediction → lower loss), forward runs &
 differs from hard, within2 metric.
+
+## 2026-06-08: BREAKTHROUGH — Approach A learns honest redshift from spectrum (the "wall" was a long incubation)
+
+### Headline
+
+The earlier conclusion that Approach A's redshift was "all copy / not
+learnable from spectrum" was **wrong — it was premature**. With redshift
+conditioning dropout (v9, run `8m9rkz37`, hard CE, `redshift_mask_ratio
+0.5`, `encoder_mask_ratio 0.5`, `redshift_loss_weight 1.0`), honest
+redshift stayed flat at random for ~33k steps, then went through a
+delayed, grokking-like phase transition and climbed steadily. The model
+now predicts redshift **from the spectrum without ever seeing it** — the
+original project goal.
+
+### v9 honest-metric trajectory (z hidden from encoder, ratio 1.0)
+
+| step | redshift_acc (TF) | ar_redshift_acc | within2 | loss_redshift | spectrum_acc | masked_spec_acc |
+|---|---|---|---|---|---|---|
+| 32,000 | 4.0% | 2.5% | — | 4.08 | 0.448 | 0.443 |
+| 37,500 | 10.6% | 10.4% | — | 3.74 | 0.451 | 0.444 |
+| 43,000 | 13.9% | 11.4% | — | 3.22 | 0.626 | 0.416 |
+| 63,480 | **40.0%** | **33.8%** | **63.3%** | **2.04** | **0.733** | **0.464** |
+
+(`within2` = predicted bin within ±2 of truth; only logged from the
+resume on the soft-labels-era code.) `redshift_acc_zgiven` stayed ~100%
+throughout — copy still available, but now the honest z-hidden number is
+real and large, not random.
+
+### Two confirmed predictions
+
+1. **Spectrum recovers once redshift learns.** v9's spectrum_acc had
+   dropped to ~0.44 (vs v8's 0.728) because a stuck, heavily-weighted
+   redshift loss (1 token ≈ 272 spectrum tokens at weight 1.0) starved
+   spectrum. As `loss_redshift` fell 4.08 → 2.04, spectrum climbed back to
+   0.733 — matching v8 — and honest `masked_spec_acc` reached its best
+   (0.464). The redshift/spectrum conflict resolves itself once redshift
+   is learnable; no weight rebalance was needed.
+2. **Resume on latest code is safe.** v9 was resumed across the
+   `--resume` / wandb-continuation / soft-labels commits with
+   `--redshift-soft-sigma` left at 0.0; the hard-CE path is byte-identical,
+   the checkpoint loaded cleanly, the W&B run continued on one chart, and
+   `within2` began logging. No disruption.
+
+### v10 (soft labels, run `zt1a7gvb`) — inconclusive, diverged to NaN
+
+v10 (`--redshift-soft-sigma 1.5`, else = v9) hit `train/loss = NaN` at
+**step ~9,000** and never recovered — long before the ~33k breakthrough
+zone, so it says nothing about whether soft labels help. The instability
+is in the soft-CE path (sigma>0). Fix before any rerun: compute the
+soft-label cross-entropy in fp32 (disable autocast for that block; AMP
+fp16 `log_softmax` over 1288 classes is the likely overflow), plus a
+finite-loss skip-guard in the train loop. **Not on the critical path** —
+hard CE reached the goal on its own; soft labels are now only worth
+testing to see if they reach higher/faster.
+
+### Status & next
+
+- v9 crashed at step 63,480 (node/wallclock, not NaN) still climbing
+  steeply (redshift 14% → 40% in 20k steps, loss_redshift still falling).
+  **Resume it** (best.pt now carries `wandb_run_id`). If still climbing at
+  the 100k cap, bump `--steps` (e.g. 150k) — this run rewards more
+  training. This v9 is the new primary Approach-A result and supersedes
+  the v8 release model (whose redshift accuracy was the copy artifact).
