@@ -29,7 +29,7 @@ RELEASE_ROOT = REPO_ROOT / "checkpoints" / "release"
 MANIFEST_PATH = RELEASE_ROOT / "MANIFEST.json"
 
 DEFAULT_TOKENIZER_ID = "spectrum_tokenizer_v1"
-DEFAULT_TRANSFORMER_ID = "transformer_approach_a_fm_v1_10k_ddp4_rw10_v8"
+DEFAULT_TRANSFORMER_ID = "approach_a_fm_v1_10k_a_ddp4_redmask50_v9"
 
 
 def format_results_table(manifest: Optional[dict] = None) -> str:

@@ -1144,3 +1144,28 @@ elapsed time (`t0` resets at process start), so a resume at step ~63k
 divided 63k by a few seconds. Cosmetic only — training/loss unaffected.
 Fixed to `rate = (step - resume_step + 1) / dt` (steps completed in this
 process). Non-resumed runs are unchanged (`resume_step = 0`).
+
+## 2026-06-08: Make v9 the default release transformer for notebooks
+
+Repointed the notebook default from the v8 copy-artifact model to v9
+(`approach_a_fm_v1_10k_a_ddp4_redmask50_v9`, run `8m9rkz37`), now the
+primary Approach-A result (honest redshift, z hidden from encoder:
+~52% exact / 47% AR / 73% within-2 at step ~109k, still training toward
+150k). Two execution sources drive the notebooks — both updated:
+`DEFAULT_TRANSFORMER_ID` in `src/inference/release.py` (nb07) and
+`default_transformer` in `checkpoints/release/MANIFEST.json` (nb08).
+Also: registered v9 in MANIFEST `models{}` (+ a v9 `approach_a_results`
+block with current honest metrics; demoted v8 to `approach_a_v8_results`
+/ "superseded"), created `checkpoints/release/<v9>/config.json`, added v9
+to `scripts/setup_release_checkpoints.py` ARTIFACT_MAP and its generated
+default, and swapped the v8 model-id doc strings in notebooks 07/08 to
+v9. Used the model_id == W&B artifact basename (no `transformer_` prefix,
+unlike v8).
+
+To actually load it, the v9 checkpoint must be fetched into
+`checkpoints/release/<v9>/best.pt`:
+`python scripts/download_release_checkpoints.py --model-id approach_a_fm_v1_10k_a_ddp4_redmask50_v9`.
+Metrics are "as of step ~109k, run in progress" — re-run
+`scripts/sync_wandb_metrics.py` (or refresh the config/MANIFEST) when the
+150k run finalizes. Honest spectrum number to quote is
+`val_masked_spec_acc` (~0.47), not the copy-inflated `spectrum_acc`.

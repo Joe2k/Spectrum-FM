@@ -31,9 +31,17 @@ ARTIFACT_MAP = {
         "wandb_artifact": f"{WANDB_ENTITY}/{WANDB_PROJECT}/spectrum_tokenizer_v1:best",
         "role": "spectrum_tokenizer",
     },
+    "approach_a_fm_v1_10k_a_ddp4_redmask50_v9": {
+        "model_id": "approach_a_fm_v1_10k_a_ddp4_redmask50_v9",
+        "display_name": "Spectrum-FM Transformer — Approach A (redshift conditioning dropout)",
+        "wandb_artifact": f"{WANDB_ENTITY}/{WANDB_PROJECT}/approach_a_fm_v1_10k_a_ddp4_redmask50_v9:best",
+        "role": "transformer",
+        "approach": "a",
+        "requires_tokenizer": "spectrum_tokenizer_v1",
+    },
     "approach_a_fm_v1_10k_a_ddp4_rw10_v8": {
         "model_id": "transformer_approach_a_fm_v1_10k_ddp4_rw10_v8",
-        "display_name": "Spectrum-FM Transformer — Approach A (encoder sees z)",
+        "display_name": "Spectrum-FM Transformer — Approach A v8 (superseded)",
         "wandb_artifact": f"{WANDB_ENTITY}/{WANDB_PROJECT}/approach_a_fm_v1_10k_a_ddp4_rw10_v8:best",
         "role": "transformer",
         "approach": "a",
@@ -149,7 +157,7 @@ def main() -> int:
         "wandb_project": WANDB_PROJECT,
         "models": models_manifest,
         "default_tokenizer": "spectrum_tokenizer_v1",
-        "default_transformer": "transformer_approach_a_fm_v1_10k_ddp4_rw10_v8",
+        "default_transformer": "approach_a_fm_v1_10k_a_ddp4_redmask50_v9",
     }
     # Preserve metrics if MANIFEST already synced from W&B; else write stub.
     existing = RELEASE / "MANIFEST.json"
