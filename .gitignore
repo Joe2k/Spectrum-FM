@@ -174,3 +174,9 @@ plots/*.pdf
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local tool/agent config (holds credentials — never commit)
+opencode.json
+
+# Raw DESI downloads
+data/desi_raw/
