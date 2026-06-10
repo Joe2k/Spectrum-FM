@@ -410,3 +410,43 @@ class TestJointEntropy:
         _, losses, _ = lfq(z)
         (losses["entropy_sample"] - losses["entropy_codebook"]).backward()
         assert z.grad is not None and torch.isfinite(z.grad).all()
+
+
+class TestEntropyTargetCap:
+    """The diversity reward saturates at entropy_target_frac * ln(K):
+    regression for tokenizer_v2_3k_ddp, where uncapped uniformity pressure
+    (weight 0.1) drove codebook_use to 1.0 while reconstruction collapsed."""
+
+    def test_quant_uses_capped_codebook_entropy(self):
+        import math
+        dim = 6
+        lfq = LookUpFreeQuantizer(dim=dim, codebook_size=2 ** dim,
+                                  entropy_weight=1.0, entropy_target_frac=0.5)
+        with torch.no_grad():
+            lfq.project_in.weight.copy_(torch.eye(dim).unsqueeze(-1))
+            lfq.project_in.bias.zero_()
+        # Fully diverse input: H_codebook ~ ln(64), far above the 0.5 target.
+        codes = lfq.codewords.t().unsqueeze(0) * 5.0
+        _, l, _ = lfq(codes)
+        target = 0.5 * math.log(2 ** dim)
+        assert l["entropy_codebook"].item() > target  # raw value uncapped
+        expected_quant = (l["commit"]
+                          + 1.0 * (l["entropy_sample"] - target)).item()
+        assert abs(l["quant"].item() - expected_quant) < 1e-5
+
+    def test_no_gradient_from_diversity_above_target(self):
+        dim = 4
+        lfq = LookUpFreeQuantizer(dim=dim, codebook_size=2 ** dim,
+                                  entropy_weight=1.0, entropy_target_frac=0.01)
+        with torch.no_grad():
+            lfq.project_in.weight.copy_(torch.eye(dim).unsqueeze(-1))
+            lfq.project_in.bias.zero_()
+        z = (torch.rand(2, dim, 32) - 0.5).requires_grad_(True)
+        _, l, _ = lfq(z)
+        # Capped term: -min(H_c, target) contributes zero gradient when
+        # H_c > target, so quant's grad equals commit+sample-entropy grad.
+        (l["quant"]).backward(retain_graph=True)
+        g_quant = z.grad.clone(); z.grad = None
+        (l["commit"] + 1.0 * l["entropy_sample"]).backward()
+        g_ref = z.grad.clone()
+        assert torch.allclose(g_quant, g_ref, atol=1e-6)

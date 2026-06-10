@@ -1559,3 +1559,41 @@ written to SCRATCH + mirrored to CFS.) This mattered immediately: the
 v9 transformer run is heading for its 150k cap and would have clobbered
 the released `:best` artifact on completion. README artifact section
 updated. Tests: 153 passed.
+
+## 2026-06-10: tokenizer_v2_3k_ddp crashed reconstruction — entropy reward capped
+
+### What happened (run `wuuapncr`, 4-GPU DDP, lr 1.2e-3, entropy_weight 0.1)
+
+The joint entropy decisively fixed collapse — codebook_use 0.25 → 0.91 by
+step 4.5k (vs 3% factorized) with flux_r2 improving to 0.286. Then it
+overshot: between step ~5.0k and 5.5k, val flux_r2 fell 0.286 → −0.05 and
+val nll_flux rose 0.75 → 11.4, and stayed there while codebook_use marched
+to exactly 1.0. Diagnosis: the diversity reward (0.1 × up to ln1024 =
+0.69 nats) is the same magnitude as the entire reconstruction loss at its
+plateau (~0.65), and the *uncapped* pressure toward perfectly uniform code
+usage kept reassigning code meanings under a hot LR until the
+encoder–decoder code contract broke. Trial `5isstibi` (single GPU,
+lr 3e-4) showed the same objective stable for 2k steps — the DDP run's
+3× higher LR amplified the scrambling.
+
+### Fix (two levers, both in `LookUpFreeQuantizer`)
+
+1. **Saturating diversity reward**: `entropy_aux = H_sample −
+   min(H_codebook, 0.9·ln K)` (`entropy_target_frac=0.9`). Once marginal
+   entropy reaches 90% of max, the uniformity gradient is exactly zero —
+   the term fights collapse but cannot trade reconstruction for cosmetic
+   uniformity. Logged `entropy_codebook` stays the raw (uncapped) value.
+2. **Default `entropy_weight` 0.1 → 0.02** (max reward 0.14 vs recon
+   ~0.65). Updated in the quantizer, `SpectrumTokenizer`,
+   `--entropy-weight` default, and both pretrain SLURM defaults.
+
+Also recommending **lr 3e-4** (not 1.2e-3) for the DDP restart: AION used
+1e-4 constant at the same batch 128 for its spectrum tokenizer; linear LR
+scaling from the single-GPU 3e-4 was too aggressive for this objective.
+
+Restart fresh (only ~50 GPU-min lost; the crashed basin isn't worth
+resuming into): same command, run name `tokenizer_v2_3k_ddp2`,
+`--lr 3e-4`, new defaults give entropy_weight 0.02 + cap. Watch
+`val/codebook_use` (expect slower but steady climb; healthy target is
+high-but-not-pinned-1.0) and `val/flux_r2` (must keep rising past 0.29).
+Tests: capped-quant arithmetic, zero-gradient-above-target. 155 passed.

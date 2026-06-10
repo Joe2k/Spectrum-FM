@@ -17,6 +17,8 @@ Architecture (based on AION paper):
 - Output: reconstructed flux (+ optional mask)
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -150,13 +152,20 @@ class LookUpFreeQuantizer(nn.Module):
     """
 
     def __init__(self, dim=10, codebook_size=1024, commitment_weight=0.25,
-                 entropy_weight=0.1, entropy_temperature=1.0):
+                 entropy_weight=0.02, entropy_temperature=1.0,
+                 entropy_target_frac=0.9):
         super().__init__()
         self.dim = dim
         self.codebook_size = codebook_size
         self.commitment_weight = commitment_weight
         self.entropy_weight = entropy_weight
         self.entropy_temperature = entropy_temperature
+        # Diversity reward saturates at this fraction of ln(codebook_size):
+        # past it, further uniformity earns nothing. Run tokenizer_v2_3k_ddp
+        # (weight 0.1, no cap) drove codebook_use to exactly 1.0 while
+        # reconstruction collapsed 15x — the uncapped uniformity pressure
+        # kept reassigning code meanings until the decoder broke.
+        self.entropy_target = entropy_target_frac * math.log(codebook_size)
 
         self.project_in = nn.Conv1d(dim, dim, kernel_size=1)
 
@@ -202,7 +211,11 @@ class LookUpFreeQuantizer(nn.Module):
         ent_sample = -(p * logp).sum(dim=1).mean()
         p_bar = p.mean(dim=(0, 2))                           # (K,) batch marginal
         ent_codebook = -(p_bar * p_bar.clamp_min(1e-12).log()).sum()
-        entropy_aux = ent_sample - ent_codebook  # minimize: confident AND diverse
+        # Saturating diversity reward: -min(H_codebook, target). Once the
+        # marginal entropy reaches the target the gradient is zero — the
+        # term fights collapse but cannot keep scrambling code assignments
+        # toward perfect uniformity at reconstruction's expense.
+        entropy_aux = ent_sample - ent_codebook.clamp(max=self.entropy_target)
 
         losses = {
             "quant": commit + self.entropy_weight * entropy_aux,
@@ -261,6 +274,9 @@ class SpectrumTokenizer(nn.Module):
             denormalized 2-channel output (v1 behavior; bright spectra and
             noisy pixels dominate — kept for A/B comparison only).
         entropy_weight: weight of the LFQ entropy objective (0 disables).
+            The codebook-diversity reward saturates at 90% of ln(K) (see
+            LookUpFreeQuantizer.entropy_target), so this only needs to be
+            large enough to escape collapse, not to dominate.
         istd_loss_weight: weight of the istd-channel auxiliary MSE in
             "nll" mode (keeps decode()'s channel 1 meaningful).
     """
@@ -277,7 +293,7 @@ class SpectrumTokenizer(nn.Module):
         decoder_dims=(384, 192, 96, 96),
         commitment_weight=0.25,
         recon_loss="nll",
-        entropy_weight=0.1,
+        entropy_weight=0.02,
         istd_loss_weight=0.1,
     ):
         super().__init__()

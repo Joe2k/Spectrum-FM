@@ -84,10 +84,12 @@ def parse_args():
                         "inverse-variance-weighted Gaussian NLL on flux "
                         "(AION Eq. 1) + small istd aux MSE. 'mse' = legacy "
                         "v1 denormalized MSE (for A/B comparison only).")
-    p.add_argument("--entropy-weight", type=float, default=0.1,
-                   help="LFQ entropy objective weight (confident per-token "
-                        "assignments, uniform marginal bit usage). "
-                        "0 disables (v1 behavior).")
+    p.add_argument("--entropy-weight", type=float, default=0.02,
+                   help="LFQ entropy objective weight. The diversity reward "
+                        "saturates at 90% of ln(codebook_size), so this only "
+                        "needs to beat collapse. 0.1 (uncapped) destabilized "
+                        "reconstruction in tokenizer_v2_3k_ddp; 0.02 is the "
+                        "new default. 0 disables (v1 behavior).")
     p.add_argument("--legacy-stretch", action="store_true",
                    help="Use the v1 length-stretch interpolation instead of "
                         "wavelength-aware resampling onto the fixed "
