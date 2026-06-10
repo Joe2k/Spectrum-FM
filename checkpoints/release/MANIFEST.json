@@ -1,44 +1,25 @@
 {
   "wandb_entity": "jjayaseelan-university-of-san-francisco",
   "wandb_project": "redshifty",
-  "metrics_source": "W&B API (verified 2026-05-20)",
   "models": {
     "spectrum_tokenizer_v1": {
       "display_name": "Spectrum-FM Spectrum Tokenizer v1",
       "wandb_artifact": "jjayaseelan-university-of-san-francisco/redshifty/spectrum_tokenizer_v1:best",
-      "wandb_run_id": "j68i7wyx",
-      "wandb_run_name": "upload_spectrum_tokenizer_v1",
       "checkpoint": "spectrum_tokenizer_v1/best.pt",
       "role": "spectrum_tokenizer"
     },
     "approach_a_fm_v1_10k_a_ddp4_redmask50_v9": {
-      "display_name": "Spectrum-FM Transformer — Approach A (redshift conditioning dropout)",
+      "display_name": "Spectrum-FM Transformer \u2014 Approach A (redshift conditioning dropout)",
       "wandb_artifact": "jjayaseelan-university-of-san-francisco/redshifty/approach_a_fm_v1_10k_a_ddp4_redmask50_v9:best",
-      "wandb_run_id": "8m9rkz37",
-      "wandb_run_name": "fm_v1_10k_a_ddp4_redmask50_v9",
-      "wandb_run_url": "https://wandb.ai/jjayaseelan-university-of-san-francisco/redshifty/runs/8m9rkz37",
       "checkpoint": "approach_a_fm_v1_10k_a_ddp4_redmask50_v9/best.pt",
       "approach": "a",
-      "requires_tokenizer": "spectrum_tokenizer_v1",
-      "note": "Primary release. Redshift conditioning dropout (redshift_mask_ratio=0.5) — predicts redshift from the spectrum without being shown it; supersedes v8 whose redshift accuracy was a copy artifact. Run still training toward 150k steps; re-sync metrics when final."
-    },
-    "transformer_approach_a_fm_v1_10k_ddp4_rw10_v8": {
-      "display_name": "Spectrum-FM Transformer — Approach A v8 (superseded; redshift = copy artifact)",
-      "wandb_artifact": "jjayaseelan-university-of-san-francisco/redshifty/approach_a_fm_v1_10k_a_ddp4_rw10_v8:best",
-      "wandb_run_id": "8fglr5zl",
-      "wandb_run_name": "fm_v1_10k_a_ddp4_rw10_v8",
-      "wandb_run_url": "https://wandb.ai/jjayaseelan-university-of-san-francisco/redshifty/runs/8fglr5zl",
-      "checkpoint": "transformer_approach_a_fm_v1_10k_ddp4_rw10_v8/best.pt",
-      "approach": "a",
-      "requires_tokenizer": "spectrum_tokenizer_v1",
-      "best_artifact_step": 22000,
-      "best_artifact_val_loss": 0.8678884017467499
+      "requires_tokenizer": "spectrum_tokenizer_v1"
     }
   },
   "default_tokenizer": "spectrum_tokenizer_v1",
   "default_transformer": "approach_a_fm_v1_10k_a_ddp4_redmask50_v9",
   "approach_a_results": {
-    "display_name": "Approach A — primary release model (v9, redshift conditioning dropout)",
+    "display_name": "Approach A \u2014 primary release model (v9, redshift conditioning dropout)",
     "training_run": "fm_v1_10k_a_ddp4_redmask50_v9",
     "wandb_run_id": "8m9rkz37",
     "wandb_run_state": "running",
@@ -61,7 +42,7 @@
     "note": "Honest redshift-from-spectrum (z hidden from encoder at eval): 52% exact / 47% AR / 73% within-2-bins, still climbing toward the 150k-step cap. val_redshift_acc here is the genuine number (z hidden); zgiven=1.0 is the copy-path ceiling. Re-run scripts/sync_wandb_metrics.py when the run finalizes. Quote val_masked_spec_acc (~0.47) as the honest spectrum number."
   },
   "approach_a_v8_results": {
-    "display_name": "Approach A v8 — SUPERSEDED (redshift accuracy was a copy artifact)",
+    "display_name": "Approach A v8 \u2014 SUPERSEDED (redshift accuracy was a copy artifact)",
     "training_run": "fm_v1_10k_a_ddp4_rw10_v8",
     "wandb_run_id": "8fglr5zl",
     "wandb_run_state": "crashed",
@@ -82,7 +63,7 @@
     "note": "Metrics from W&B summary at best artifact (step 22000). Different run than phase10_mask50_a_big."
   },
   "approach_b_results": {
-    "display_name": "Approach B (encoder never sees z) — metrics only",
+    "display_name": "Approach B (encoder never sees z) \u2014 metrics only",
     "training_run": "phase10_mask50_b",
     "wandb_run_id": "3na766th",
     "wandb_run_state": "failed",
@@ -101,7 +82,7 @@
     "val_masked_spec_acc_teacher_forced": 0.2813200719457822,
     "val_ar_n_samples": 28,
     "conclusion": "Encoder does not learn redshift from spectrum alone; contrast with Approach A release model.",
-    "note": "No checkpoint shipped — logged results from W&B run phase10_mask50_b only."
+    "note": "No checkpoint shipped \u2014 logged results from W&B run phase10_mask50_b only."
   },
   "reference_runs": {
     "phase10_mask50_a_big": {
@@ -117,5 +98,6 @@
       "val_spectrum_acc_autoregressive": 0.01156030513828679,
       "note": "Earlier Phase-10 writeup run on 200-healpix manifest; not the shipped release checkpoint."
     }
-  }
+  },
+  "metrics_source": "W&B API (verified 2026-05-20)"
 }

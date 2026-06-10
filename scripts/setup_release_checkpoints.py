@@ -108,7 +108,13 @@ def main() -> int:
 
     for artifact_name, meta in ARTIFACT_MAP.items():
         model_id = meta["model_id"]
-        src_pt = _find_wandb_pt(artifact_name)
+        try:
+            src_pt = _find_wandb_pt(artifact_name)
+        except FileNotFoundError as e:
+            # Only some artifacts may be downloaded locally; skip the rest
+            # instead of aborting (e.g. you pulled v9 but not the older v8).
+            print(f"skip {model_id}: {e}", file=sys.stderr)
+            continue
         out_dir = RELEASE / model_id
         out_dir.mkdir(parents=True, exist_ok=True)
         dst_pt = out_dir / "best.pt"
@@ -163,7 +169,8 @@ def main() -> int:
     existing = RELEASE / "MANIFEST.json"
     if existing.is_file():
         old = json.loads(existing.read_text())
-        for key in ("approach_a_results", "approach_b_results", "reference_runs", "metrics_source"):
+        for key in ("approach_a_results", "approach_a_v8_results",
+                    "approach_b_results", "reference_runs", "metrics_source"):
             if key in old:
                 manifest[key] = old[key]
     (RELEASE / "MANIFEST.json").write_text(json.dumps(manifest, indent=2) + "\n")
