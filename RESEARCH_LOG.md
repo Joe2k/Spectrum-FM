@@ -1169,3 +1169,227 @@ Metrics are "as of step ~109k, run in progress" — re-run
 `scripts/sync_wandb_metrics.py` (or refresh the config/MANIFEST) when the
 150k run finalizes. Honest spectrum number to quote is
 `val_masked_spec_acc` (~0.47), not the copy-inflated `spectrum_acc`.
+
+## 2026-06-08: setup_release_checkpoints.py — skip models not downloaded locally
+
+`scripts/setup_release_checkpoints.py` iterates every entry in
+`ARTIFACT_MAP` and hard-failed (`FileNotFoundError`) if any model's W&B
+artifact wasn't present under `checkpoints/wandb_artifacts/`. After adding
+v8 alongside v9, a user who only pulled v9 + the tokenizer hit a crash on
+the v8 entry — *after* v9 was already symlinked, so it aborted before
+regenerating the MANIFEST. Wrapped `_find_wandb_pt` in the loop to
+**skip + warn** on missing downloads instead of aborting, and added
+`approach_a_v8_results` to the keys preserved when the MANIFEST is
+regenerated. Re-running now sets up whatever artifacts are present (v9 +
+tokenizer) and writes the MANIFEST cleanly; non-downloaded models are
+listed in the results blocks but omitted from `models{}` until pulled.
+
+---
+
+## 2026-06-08: Notebook 07 — fix white gap in OOD AR reconstruction plot
+
+OOD Visualization 6 (`notebooks/07_visualize_predictions.ipynb`) had a large
+white band between the suptitle and the plots. The figure is very tall
+(`N_OOD * 2.8` ≈ 28 in) and the `suptitle` was placed at `y=1.005` with no
+adjustment to the subplot top margin, so the axes started at matplotlib's
+default `top≈0.88` — a 12% margin that is a huge absolute gap on a tall
+figure. Fix: added `fig.subplots_adjust(top=0.97)` and moved the title down
+to `y=0.985` so it sits just above the first plot.
+
+---
+
+## 2026-06-09: Notebook 07 — residual subplots on Viz 1 & Viz 2
+
+Added a `true − reconstruction` residual row under each spectrum in the
+in-distribution DESI reconstruction plots (Viz 1 teacher-forced, Viz 2
+autoregressive), matching the purple residual panels already used in the
+OOD SDSS plot (Viz 6). Each sample is now a 2-row block (flux height 3 +
+residual height 1) via `gridspec_kw` height_ratios, with the per-spectrum
+residual sum shown as `Σ=...` in the residual y-label and a dashed zero
+line. Same top-margin fix (`subplots_adjust(top=0.97)`, suptitle `y=0.985`)
+as Viz 6.
+
+---
+
+## 2026-06-09: Roadmap — planned changes (AION-paper review + repo audit)
+
+Full review of the repo (v9 transformer, spectrum_tokenizer_v1, training
+loop) against the AION-1 paper. Plan of record below, roughly in
+priority order. Items 1–2 are committed next actions (project owner);
+3–9 are queued recommendations from the audit.
+
+### 1. Rebin redshift: 256 → 4096 bins (~0.001-level bin width) [NEXT]
+
+Spectroscopic redshifts are good to ~0.001; our current 256 CDF bins are
+far coarser than the label precision, so the model is being trained
+against an artificially blurred target. Plan:
+
+- `RedshiftTokenizer(n_levels=4096)`; vocab becomes
+  `REDSHIFT_TOKEN_OFFSET (1032) + 4096 = 5128`.
+- Make the redshift sub-vocab width configurable end-to-end instead of
+  hardcoded: `--z-bins` flag in `nersc/train_transformer.py` (+ local
+  `scripts/train.py`), `SpectrumTransformer(vocab_size=1032 + z_bins)`,
+  helper `vocab_size_for_z_bins()` in `src/models/transformer.py`.
+  Default stays 256 so v8/v9 checkpoints keep loading.
+- Inference (`src/inference/release.py`) infers vocab size from the
+  checkpoint's `token_embedding.weight` shape — old (1288) and new
+  (5128) checkpoints both load with no config changes.
+- Resume guard: refuse `--resume` when the checkpoint's embedded
+  z-tokenizer `n_levels` ≠ `--z-bins` (vocab shape mismatch).
+- Caveat to verify empirically: our binning is CDF-equalized (equal
+  probability mass), NOT uniform in z — bin width varies. 4096 bins ≈
+  0.001 only on average over the fitted z range; dense regions (most
+  galaxies) get much finer bins, tails (high-z QSOs) get wider ones.
+  Log bin-width stats (median/p90/max from `get_bin_edges()`) at fit
+  time. Also: 4096 quantiles need a bigger fit sample — warn when
+  `len(zs) < ~20 × n_bins` and raise `--z-fit-files` accordingly.
+- Knock-on effects to remember: `redshift_acc_within2` becomes 16×
+  stricter (±2 of 4096 vs ±2 of 256) — don't compare across bin counts;
+  if reviving soft labels, sigma is in *bins* so the v10-equivalent
+  becomes `--redshift-soft-sigma ~24` (1.5 × 4096/256); 4096-way CE is
+  a harder classification problem — expect a longer incubation unless
+  paired with soft labels (item 5).
+
+### 2. Retrain spectrum tokenizer on broadened DR1 data [NEXT]
+
+`spectrum_tokenizer_v1` was trained on only ~500k SV3-bright spectra.
+The reconstruction ceiling for everything downstream is the tokenizer,
+and SV3-bright underrepresents the flux/SNR/object-type distribution
+(dark-program ELGs/LRGs/QSOs especially). Plan:
+
+- Build a broader manifest with `nersc/build_dr1_index.py` (already
+  supports `--surveys sv3 main --programs bright dark`); stage to
+  $SCRATCH; retrain as `tokenizer_v2`.
+- Add `--surveys`/`--programs` filter flags to
+  `nersc/pretrain_tokenizer.py` so one big manifest can be subset per
+  run and the survey/program mix is logged into the run config.
+- While retraining (from the AION audit, same training run is the
+  cheapest place to fix these):
+  - Replace plain MSE on *denormalized* flux with inverse-variance-
+    weighted Gaussian NLL (AION Eq. 1) — stops bright spectra and noisy
+    pixels from dominating; we already carry ivar/istd as an input
+    channel. At minimum compute the loss in normalized space.
+  - Add the LFQ entropy objective (per-sample entropy down, batch
+    entropy up) and log codebook utilization — commitment loss alone
+    invites dead codes.
+  - Train much longer: AION used 215k steps @ batch 128 to reach
+    reconstruction R² = 0.994; our default is 10k @ 16. Measure held-out
+    R² as the gating metric for tokenizer_v2.
+  - Fix the no-op log10 round-trip in `normalize()`
+    (`denorm = 10^log10(norm+1) − 1 = norm`).
+
+### 3. Predict only masked positions (4M/MAE-style)
+
+With `encoder_mask_ratio 0.5`, half the decoder targets are visible to
+the encoder — pure copy tasks that consume half the gradient budget and
+inflate `spectrum_acc`. Set targets to −100 at unmasked spectrum
+positions so the loss is masked-reconstruction only (AION/4M decoder
+queries never see token values). Longer term: replace causal AR over
+272 spectrum tokens with ROAR-style iterative masked decoding
+(O(log N) decoder calls; left-to-right has no physical meaning for a
+spectrum).
+
+### 4. Physical redshift metrics
+
+Bin accuracy is not comparable across binnings and hides physical
+error size. Add to eval: NMAD σ of Δz/(1+z), catastrophic outlier
+fraction (|Δz|/(1+z) > 0.15), broken down by spectype
+(galaxy/star/QSO). Decode predicted bin → ẑ via the z-tokenizer and
+compare against pipeline z. These are the community-standard numbers.
+
+### 5. Soft labels retry, fp32 (v10 redo)
+
+v10 NaN'd at ~9k steps in the soft-CE path under fp16 autocast.
+Compute `_redshift_soft_ce` under `autocast(enabled=False)` in fp32 —
+or move training to bf16 (no GradScaler, kills the overflow class).
+With 4096 bins the ordinal gradient matters more, not less.
+
+### 6. Scale data + throughput before model size
+
+Pre-tokenize the corpus to disk (272 ints/spectrum) instead of running
+the frozen ConvNeXt tokenizer forward every step; train on full DR1
+(v9 was still climbing at 109k steps). Only scale depth (12+12,
+AION-B-ish) after the loss flattens at full data.
+
+### 7. Embedding-probe evaluation suite
+
+Frozen encoder + mean/attentive pooling + linear/MLP probes: z
+regression, spectype classification, stellar params (Zhang et al. 2024
+DESI labels) / galaxy props (PROVABGS). This is how AION substantiates
+"understanding" — and our path to an apples-to-apples row against
+AION-1's Table 1/3 spectrum-only results.
+
+### 8. Engineering
+
+`F.scaled_dot_product_attention` (Flash) in `MultiHeadAttention`;
+KV cache in `generate()` (currently O(L²) re-decode per token — why AR
+eval is capped at 4 batches / n=201); bf16 everywhere.
+
+### 9. Wavelength-aware resampling
+
+`interpolate_to_grid` stretches any input length onto 8704 samples,
+ignoring wavelength coverage — correct only for DESI's fixed 7081-pixel
+grid. Adopt AION's convention (fixed wavelength grid 3500–10462.4 Å @
+0.8 Å) before quoting any OOD/SDSS numbers; also unblocks multi-survey
+training later.
+
+---
+
+## 2026-06-09: Implemented roadmap items 1–2 — configurable z bins (4096) + balanced tokenizer-v2 data path
+
+### 1. `--z-bins` end-to-end (roadmap item 1)
+
+- `src/models/transformer.py`: `vocab_size_for_z_bins(n)` =
+  `REDSHIFT_TOKEN_OFFSET (1032) + n`; redshift tokens stay the last
+  vocab block so special/spectrum IDs are unchanged. `is_redshift_token`
+  takes an optional `vocab_size`. Defaults untouched (`TOTAL_VOCAB_SIZE`
+  1288) — v8/v9 checkpoints unaffected.
+- `nersc/train_transformer.py`: `--z-bins` (default 256; pass 4096 for
+  ~0.001-level bins) drives both `RedshiftTokenizer(n_levels=...)` and
+  `SpectrumTransformer(vocab_size=...)`. At fit time prints
+  median/p90/max bin width in z (bins are CDF-equalized, so width
+  varies — this line verifies the precision actually achieved) and
+  warns when the fit sample has <20 z values per bin (raise
+  `--z-fit-files`). `--resume` refuses a checkpoint whose embedded
+  z-tokenizer `n_levels` ≠ `--z-bins` (vocab shape mismatch). `z_bins`
+  added to W&B artifact metadata.
+- `scripts/train.py`: same via `--z_bins`.
+- `src/inference/release.py`: vocab is now inferred from the
+  checkpoint's `token_embedding.weight` shape — 1288 (legacy) and 5128
+  (4096-bin) models load through the same path.
+- SLURM: `Z_BINS` env passthrough in `train_transformer.slurm` and
+  `train_transformer_ddp.slurm`.
+- Tests: 4096-bin round-trip precision (<1.5e-3 max |dz| on a dense
+  fit), 4096-vs-256 resolution improvement, monotonic bin edges,
+  vocab helper, 4096-vocab forward/loss, soft-CE adapting to the wider
+  vocab, `is_redshift_token` with wider vocab. Full suite: 136 passed.
+
+### 2. Balanced manifest path for tokenizer v2 (roadmap item 2)
+
+Root cause of the SV3-bright-only v1 training set found:
+`build_dr1_index.py --max-healpix` is a **global** cap filled
+sequentially over the (survey, program) loop, so
+`pretrain_tokenizer.slurm`'s `MAX_HEALPIX=2000` consumed itself on
+sv3/bright before reaching dark or main. Changes:
+
+- `build_dr1_index.py`: new `--max-healpix-per-pair N` caps each
+  (survey, program) pair separately (balanced mix); per-pair kept-count
+  logging; `--max-healpix` documented as legacy/global.
+- `pretrain_tokenizer.py`: `--surveys` / `--programs` manifest filters
+  + per-(survey, program) record-mix logging (lands in the W&B config),
+  hard error if filters empty the manifest.
+- `pretrain_tokenizer.slurm`: defaults now `MAX_HEALPIX_PER_PAIR=500`
+  over `sv3 main × bright dark` (≈ v1 volume, balanced), run name
+  `tokenizer_v2_*`, SURVEYS/PROGRAMS env-overridable.
+- `nersc/README.md`: new "Redshift bins (`--z-bins`)" and "Tokenizer
+  v2: broadened training data" sections (caveats: bin-count-incompatible
+  checkpoints, within2 metric 16× stricter at 4096, soft-sigma scales
+  ~×16, gate v2 on held-out R², transformer must be retrained against a
+  new codebook).
+
+### Not yet done (stays on the roadmap)
+
+Tokenizer loss change (ivar-weighted NLL), LFQ entropy term, longer
+tokenizer schedule, masked-only decoder targets, physical z metrics
+(NMAD / outlier fraction), fp32 soft-CE — items 2 (loss part) and 3–9
+of the 2026-06-09 roadmap entry.
