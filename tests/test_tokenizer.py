@@ -276,3 +276,91 @@ class TestFluxR2:
         ivar = torch.ones(1, 100)
         ivar[0, 50:] = 0.0               # ...which is excluded
         assert flux_r2(flux, recon, ivar=ivar).item() == pytest.approx(1.0)
+
+
+class TestWavelengthResampling:
+    """Wavelength-aware resampling onto the fixed 3500-10462.4 A grid."""
+
+    def _desi_wave(self, n=7781):
+        # DESI native stitched grid: 3600..9824 at 0.8 A
+        return 3600.0 + 0.8 * torch.arange(n)
+
+    def test_desi_grid_alignment(self):
+        """DESI's 0.8 A grid aligns sample-for-sample at offset 125 —
+        resampling must copy values exactly (no interpolation blur)."""
+        from src.tokenizers.spectrum import GRID_WAVE_MIN, GRID_WAVE_STEP
+        model = SpectrumTokenizer()
+        wave = self._desi_wave()
+        flux = torch.sin(wave / 200.0).unsqueeze(0)
+        istd = torch.ones_like(flux)
+        x = torch.stack([flux, istd], dim=1)
+        out = model.resample_to_grid(x, wave)
+        offset = int(round((3600.0 - GRID_WAVE_MIN) / GRID_WAVE_STEP))
+        assert offset == 125
+        assert torch.allclose(out[0, 0, offset:offset + 7781], flux[0], atol=1e-4)
+
+    def test_out_of_coverage_is_zero(self):
+        """Grid pixels outside the input coverage: flux = 0 and istd = 0
+        (so ivar weighting excludes them from the NLL loss)."""
+        model = SpectrumTokenizer()
+        wave = self._desi_wave()
+        x = torch.ones(1, 2, wave.shape[0])
+        out = model.resample_to_grid(x, wave)
+        assert torch.all(out[0, :, :125] == 0)      # < 3600 A
+        assert torch.all(out[0, :, 125 + 7781:] == 0)  # > 9824 A
+        assert torch.all(out[0, :, 200:7900] != 0)  # coverage ends at idx 7905
+
+    def test_log_spaced_input(self):
+        """SDSS-like log-lambda spacing: a smooth function survives
+        resampling (this is exactly what the legacy stretch got wrong)."""
+        model = SpectrumTokenizer()
+        wave = torch.logspace(
+            torch.log10(torch.tensor(3650.0)),
+            torch.log10(torch.tensor(10300.0)), 4000)
+        flux = torch.sin(wave / 300.0).unsqueeze(0)
+        istd = torch.ones_like(flux)
+        x = torch.stack([flux, istd], dim=1)
+        out = model.resample_to_grid(x, wave)
+        from src.tokenizers.spectrum import GRID_WAVE_MIN, GRID_WAVE_STEP, LATENT_GRID_SIZE
+        grid = GRID_WAVE_MIN + GRID_WAVE_STEP * torch.arange(LATENT_GRID_SIZE)
+        in_cov = (grid >= wave[0]) & (grid <= wave[-1])
+        expected = torch.sin(grid / 300.0)
+        err = (out[0, 0][in_cov] - expected[in_cov]).abs().max()
+        assert err < 5e-3, f"max resampling error {err:.4f}"
+
+    def test_forward_and_encode_with_wavelength(self):
+        model = SpectrumTokenizer()
+        model.eval()
+        wave = self._desi_wave()
+        x = torch.randn(2, 2, wave.shape[0])
+        x[:, 1] = x[:, 1].abs() + 0.5
+        with torch.no_grad():
+            recon, loss, idx_fwd = model(x, wavelength=wave)
+            idx_enc, _ = model.encode(x, wavelength=wave)
+        assert recon.shape == (2, 2, LATENT_GRID_SIZE)
+        assert torch.isfinite(loss["total"])
+        assert torch.equal(idx_fwd, idx_enc)
+
+    def test_no_wavelength_is_legacy_stretch(self):
+        """encode() without wavelengths must reproduce v1 behavior bit-for-bit."""
+        model = SpectrumTokenizer()
+        model.eval()
+        x = torch.randn(1, 2, 7781)
+        with torch.no_grad():
+            a, _ = model.encode(x)
+            b, _ = model.encode(model.interpolate_to_grid(x))
+        assert torch.equal(a, b)
+
+    def test_per_batch_wavelengths(self):
+        """(B, L) wavelength arrays: each row resampled on its own grid."""
+        model = SpectrumTokenizer()
+        w1 = self._desi_wave(4000)
+        w2 = 4000.0 + 0.9 * torch.arange(4000)
+        wave = torch.stack([w1, w2])
+        x = torch.ones(2, 2, 4000)
+        out = model.resample_to_grid(x, wave)
+        from src.tokenizers.spectrum import GRID_WAVE_MIN, GRID_WAVE_STEP
+        # Row 1 covers from 3600 A (grid idx 125); row 2 from 4000 A (idx 625).
+        assert out[0, 0, 130] == 1.0
+        assert out[1, 0, 130] == 0.0
+        assert out[1, 0, 630] == 1.0

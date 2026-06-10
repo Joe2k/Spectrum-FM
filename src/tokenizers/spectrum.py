@@ -28,6 +28,14 @@ import numpy as np
 LATENT_GRID_SIZE = 8704
 N_TOKENS = 273
 
+# Fixed WAVELENGTH grid the latent grid corresponds to (AION convention):
+# 3500.0 .. 10462.4 Angstrom at 0.8 A spacing — exactly 8704 points.
+# DESI's native stitched grid (3600–9824 A @ 0.8 A, 7781 px) aligns with
+# this grid sample-for-sample at offset (3600-3500)/0.8 = 125.
+GRID_WAVE_MIN = 3500.0
+GRID_WAVE_STEP = 0.8
+GRID_WAVE_MAX = GRID_WAVE_MIN + GRID_WAVE_STEP * (LATENT_GRID_SIZE - 1)  # 10462.4
+
 
 class LayerNorm1d(nn.Module):
     """LayerNorm for 1D conv features (B, C, L)."""
@@ -334,22 +342,77 @@ class SpectrumTokenizer(nn.Module):
             nn.init.constant_(m.weight, 1.0)
     
     def interpolate_to_grid(self, x, target_length=LATENT_GRID_SIZE):
-        """Interpolate spectrum to fixed grid length."""
+        """LEGACY length stretch: interpolate to a fixed number of samples,
+        ignoring the wavelength solution. Self-consistent for DESI-only
+        training (a fixed monotone remap of its 7781-px grid) and what
+        spectrum_tokenizer_v1 was trained with — kept as the default so v1
+        checkpoints keep working. Physically wrong for any other survey
+        (e.g. SDSS's log-lambda spacing); use `resample_to_grid` instead.
+        """
         if x.shape[-1] != target_length:
             x = F.interpolate(x, size=target_length, mode='linear', align_corners=False)
         return x
+
+    def resample_to_grid(self, x, wavelength):
+        """Wavelength-aware resampling onto the fixed grid (AION convention):
+        3500–10462.4 A at 0.8 A. Linear interpolation in wavelength; grid
+        points outside the input's coverage get flux = 0 AND istd = 0, so
+        ivar weighting (the 'nll' loss) excludes them automatically.
+
+        Args:
+            x: (B, 2, L) [flux, istd] on the native wavelength grid
+            wavelength: (L,) or (B, L) ascending wavelengths in Angstrom
+
+        Returns:
+            (B, 2, LATENT_GRID_SIZE) resampled spectrum
+        """
+        B, C, L = x.shape
+        device = x.device
+        grid = GRID_WAVE_MIN + GRID_WAVE_STEP * torch.arange(
+            LATENT_GRID_SIZE, device=device, dtype=torch.float32)  # (G,)
+        if wavelength.dim() == 1:
+            wavelength = wavelength.unsqueeze(0).expand(B, -1)
+        wave = wavelength.to(device=device, dtype=torch.float32).contiguous()
+
+        # Bracketing input indices for every grid point, per batch row.
+        gridB = grid.unsqueeze(0).expand(B, -1).contiguous()
+        idx_hi = torch.searchsorted(wave, gridB).clamp(1, L - 1)  # (B, G)
+        idx_lo = idx_hi - 1
+        w_lo = torch.gather(wave, 1, idx_lo)
+        w_hi = torch.gather(wave, 1, idx_hi)
+        t = ((gridB - w_lo) / (w_hi - w_lo).clamp(min=1e-6)).clamp(0.0, 1.0)
+
+        x_f = x.float()
+        lo = torch.gather(x_f, 2, idx_lo.unsqueeze(1).expand(B, C, -1))
+        hi = torch.gather(x_f, 2, idx_hi.unsqueeze(1).expand(B, C, -1))
+        out = lo + (hi - lo) * t.unsqueeze(1)
+
+        # Zero everything outside the input's wavelength coverage.
+        in_cov = (gridB >= wave[:, :1]) & (gridB <= wave[:, -1:])
+        return out * in_cov.unsqueeze(1).to(out.dtype)
+
+    def _to_grid(self, x, wavelength=None):
+        """Wavelength-aware resample when wavelengths are given, else the
+        legacy length stretch (v1-compatible)."""
+        if wavelength is not None:
+            return self.resample_to_grid(x, wavelength)
+        return self.interpolate_to_grid(x)
     
-    def encode(self, x):
+    def encode(self, x, wavelength=None):
         """Encode spectrum to quantized tokens.
-        
+
         Args:
             x: (B, in_channels, L) input spectrum
-            
+            wavelength: optional (L,) or (B, L) wavelengths in Angstrom.
+                When given, the spectrum is resampled onto the fixed
+                wavelength grid (physically correct, survey-agnostic).
+                When None, the legacy v1 length stretch is used.
+
         Returns:
             indices: (B, dim, n_tokens) discrete token indices
             denorm: (B,) normalization factor for denormalization
         """
-        x = self.interpolate_to_grid(x)
+        x = self._to_grid(x, wavelength)
         x_norm, denorm = self.normalize(x)
         x = self.encoder_stem(x_norm)
         
@@ -448,19 +511,22 @@ class SpectrumTokenizer(nn.Module):
         
         return x
     
-    def forward(self, x):
+    def forward(self, x, wavelength=None):
         """Full forward pass: encode + quantize + decode.
-        
+
         Args:
             x: (B, in_channels, L) input spectrum
-            
+            wavelength: optional (L,) or (B, L) wavelengths in Angstrom;
+                see `encode`. With the 'nll' loss, out-of-coverage grid
+                pixels carry ivar = 0 and are excluded automatically.
+
         Returns:
             recon: (B, in_channels, LATENT_GRID_SIZE) reconstructed spectrum
             loss: dict with quantization and reconstruction losses
             indices: (B, n_tokens) discrete token indices
         """
-        # Interpolate to fixed grid
-        x_grid = self.interpolate_to_grid(x)
+        # Map onto the fixed grid
+        x_grid = self._to_grid(x, wavelength)
         
         # Normalize
         x_norm, denorm = self.normalize(x_grid)

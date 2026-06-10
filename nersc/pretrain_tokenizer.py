@@ -75,6 +75,10 @@ def parse_args():
                    help="LFQ entropy objective weight (confident per-token "
                         "assignments, uniform marginal bit usage). "
                         "0 disables (v1 behavior).")
+    p.add_argument("--legacy-stretch", action="store_true",
+                   help="Use the v1 length-stretch interpolation instead of "
+                        "wavelength-aware resampling onto the fixed "
+                        "3500-10462.4 A grid. Only for reproducing v1.")
 
     # Optim
     p.add_argument("--steps", type=int, default=10_000,
@@ -122,7 +126,8 @@ def lr_at(step: int, base_lr: float, warmup: int, total: int) -> float:
     return base_lr * (0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * progress)))
 
 
-def evaluate(model, loader, device, amp: bool, max_batches: int = 50):
+def evaluate(model, loader, device, amp: bool, max_batches: int = 50,
+             wavelength_aware: bool = True):
     """Held-out loss components + flux R^2 (the tokenizer gating metric,
     AION reference: 0.994) + codebook utilization across the val pass."""
     model.eval()
@@ -140,12 +145,14 @@ def evaluate(model, loader, device, amp: bool, max_batches: int = 50):
             ivar = batch["ivar"].to(device, non_blocking=True)
             istd = torch.sqrt(ivar.clamp(min=1e-10))
             x = torch.stack([flux, istd], dim=1)
+            wave = (batch["wavelength"].to(device, non_blocking=True)
+                    if wavelength_aware and "wavelength" in batch else None)
             with torch.amp.autocast("cuda", enabled=amp):
-                recon, loss, indices = model(x)
+                recon, loss, indices = model(x, wavelength=wave)
             for k, v in loss.items():
                 losses[k] = losses.get(k, 0.0) + v.item()
             # R^2 on the model grid (ivar > 0 pixels only)
-            x_grid = model.interpolate_to_grid(x)
+            x_grid = model._to_grid(x, wave)
             r2_sum += flux_r2(x_grid[:, 0], recon[:, 0].float(),
                               ivar=x_grid[:, 1].square()).item()
             codes_seen[indices.unique()] = True
@@ -328,10 +335,12 @@ def main():
         ivar = batch["ivar"].to(device, non_blocking=True)
         istd = torch.sqrt(ivar.clamp(min=1e-10))
         x = torch.stack([flux, istd], dim=1)
+        wave = (batch["wavelength"].to(device, non_blocking=True)
+                if not args.legacy_stretch and "wavelength" in batch else None)
 
         optim.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda", enabled=args.amp):
-            _, loss, indices = model(x)
+            _, loss, indices = model(x, wavelength=wave)
 
         scaler.scale(loss["total"]).backward()
         if args.grad_clip > 0:
@@ -374,6 +383,7 @@ def main():
             val_losses = evaluate(
                 model.module if is_distributed else model,
                 val_loader, device, args.amp,
+                wavelength_aware=not args.legacy_stretch,
             )
             model.train()
             msg = {"kind": "val", "step": step, **{f"val_{k}": v for k, v in val_losses.items()}}
@@ -416,6 +426,7 @@ def main():
                             "val_codebook_use": val_losses.get("codebook_use"),
                             "recon_loss": args.recon_loss,
                             "entropy_weight": args.entropy_weight,
+                            "wavelength_aware": not args.legacy_stretch,
                             "step": step,
                             "full_state": True,
                         },

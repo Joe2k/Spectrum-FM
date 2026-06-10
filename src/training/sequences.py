@@ -39,6 +39,7 @@ def tokenize_and_build(
     encoder_mask_ratio: float = 0.0,
     redshift_mask_ratio: float = 0.0,
     rng: Optional[torch.Generator] = None,
+    wavelength_aware: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Convert a raw spectrum batch into transformer-ready sequences.
 
@@ -62,6 +63,10 @@ def tokenize_and_build(
             1.0 (always hide z). Ignored for Approach B (encoder has no
             redshift). Default 0.0 = z always visible (no dropout).
         rng: optional `torch.Generator` for reproducible masking.
+        wavelength_aware: pass the batch's "wavelength" array to the
+            spectrum tokenizer so it resamples onto the fixed wavelength
+            grid instead of length-stretching. Use ONLY with a tokenizer
+            trained wavelength-aware (v2+); v1 expects the legacy stretch.
 
     Returns:
         encoder_input: (B, L_enc) long tensor.
@@ -86,8 +91,17 @@ def tokenize_and_build(
     istd = torch.sqrt(ivar.clamp(min=1e-10))
     x = torch.stack([flux, istd], dim=1)  # (B, 2, L)
 
+    wave = None
+    if wavelength_aware and "wavelength" in raw_batch:
+        wave = raw_batch["wavelength"].to(device, non_blocking=True)
+
     with torch.no_grad():
-        spec_indices, _ = spec_tok.encode(x)  # (B, n_tokens) or (B, 1, n_tokens)
+        # Only pass the kwarg when set, so legacy tokenizer wrappers/stubs
+        # without a `wavelength` parameter keep working.
+        if wave is not None:
+            spec_indices, _ = spec_tok.encode(x, wavelength=wave)
+        else:
+            spec_indices, _ = spec_tok.encode(x)  # (B, n_tokens) or (B, 1, n_tokens)
     if spec_indices.dim() == 3:
         spec_indices = spec_indices.squeeze(1)
     spec_tokens = spec_indices.long() + SPECTRUM_TOKEN_OFFSET  # (B, T_spec)

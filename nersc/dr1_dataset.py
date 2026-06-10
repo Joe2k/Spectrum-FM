@@ -176,9 +176,21 @@ def collate_dr1_skip_none(batch):
         out[: t.shape[0]] = t
         return out
 
+    def _pad_wave(t):
+        # Wavelengths must stay strictly ascending for searchsorted-based
+        # resampling, so extend the grid past the data instead of zero-fill.
+        # Padded positions have ivar = 0, so they carry no loss weight.
+        n = t.shape[0]
+        if n == L:
+            return t
+        step = (t[-1] - t[-2]) if n >= 2 else torch.tensor(0.8, dtype=t.dtype)
+        ext = t[-1] + step * torch.arange(1, L - n + 1, dtype=t.dtype)
+        return torch.cat([t, ext])
+
     return {
         "flux": torch.stack([_pad(b["flux"]) for b in batch]),
         "ivar": torch.stack([_pad(b["ivar"], 0.0) for b in batch]),
         "mask": torch.stack([_pad(b["mask"].to(torch.bool), True) for b in batch]),
+        "wavelength": torch.stack([_pad_wave(b["wavelength"]) for b in batch]),
         "z": torch.stack([b["z"] for b in batch]),
     }

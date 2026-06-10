@@ -1450,3 +1450,40 @@ Remaining before launch: none code-side; build the balanced manifest
 direction (confident+diverse < unconfident+collapsed), NLL component
 logging, ivar=0 exclusion, scale-invariance sanity, mse legacy mode,
 flux_r2 (perfect=1, mean-prediction≈0, masked-region exclusion).
+
+## 2026-06-09: Wavelength-aware resampling (roadmap item 9) — in before v2 trains
+
+This had to land before tokenizer v2: it changes the tokenizer's input
+convention, and changing it after training would mean a v3.
+
+What was wrong: `interpolate_to_grid` stretches ANY input length onto
+8704 samples ignoring the wavelength solution. Two real consequences
+(not just convention):
+1. **Batch-dependent wavelength mapping.** The collate pads to the
+   longest spectrum in the batch, then the stretch maps [0, L_batch] →
+   [0, 8704]; a spectrum's wavelengths land at different grid positions
+   depending on what it was batched with. Most DESI rows are the full
+   7781 px so the effect is small, but it is a genuine inconsistency.
+2. **OOD evaluation was physically wrong.** SDSS is log-lambda spaced
+   with different coverage; the stretch misaligns every spectral
+   feature. Notebook 07's OOD numbers were distorted by this.
+
+Change: fixed wavelength grid 3500–10462.4 Å @ 0.8 Å (= exactly our
+8704 samples; DESI's native 3600–9824 @ 0.8 Å grid aligns
+sample-for-sample at offset 125, so DESI resampling is a lossless
+copy, no interpolation blur). `resample_to_grid(x, wavelength)` does
+batched searchsorted linear interpolation; out-of-coverage grid pixels
+get flux=0 AND istd=0, which the new ivar-weighted NLL excludes
+automatically (the two changes compose).
+
+Compatibility: `encode`/`forward` take optional `wavelength`; when
+None, the legacy stretch is used — v1 checkpoints and the v9
+transformer inference path are bit-for-bit unchanged (tested).
+`collate_dr1_skip_none` now carries a monotonically-extended padded
+wavelength array; `pretrain_tokenizer.py` is wavelength-aware by
+default (`--legacy-stretch` to reproduce v1); `tokenize_and_build`
+gains `wavelength_aware=False` for the future v2 transformer (only
+passes the kwarg when set, so tokenizer stubs/wrappers keep working).
+Tests: DESI offset-125 exact copy, out-of-coverage zeros, SDSS-like
+log-spaced roundtrip (<5e-3), per-row (B, L) wavelengths, legacy-path
+bit-equality. Suite: 151 passed.
