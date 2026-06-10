@@ -45,7 +45,9 @@ BUILD_FLAGS=""
 [ -n "$MAX_HEALPIX" ] && BUILD_FLAGS="$BUILD_FLAGS --max-healpix $MAX_HEALPIX"
 [ -n "$MAX_HEALPIX_PER_PAIR" ] && BUILD_FLAGS="$BUILD_FLAGS --max-healpix-per-pair $MAX_HEALPIX_PER_PAIR"
 
-MANIFEST="$SCRATCH_OUT/manifests/dr1_${SLURM_JOB_ID}.jsonl"
+# Pre-built manifest (e.g. from an interactive node) is reused if passed;
+# otherwise a fresh one is built under a job-id name.
+MANIFEST="${MANIFEST:-$SCRATCH_OUT/manifests/dr1_${SLURM_JOB_ID}.jsonl}"
 # CFS mirror lives under the project CFS dir (multi-TB quota), not $HOME (40 GB).
 DEFAULT_CFS_BASE="/global/cfs/cdirs/deepsrch/$USER/checkpoints"
 CFS_OUT="${CFS_OUT:-$DEFAULT_CFS_BASE/$RUN_NAME}"

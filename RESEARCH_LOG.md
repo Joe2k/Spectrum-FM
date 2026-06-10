@@ -1393,3 +1393,12 @@ Tokenizer loss change (ivar-weighted NLL), LFQ entropy term, longer
 tokenizer schedule, masked-only decoder targets, physical z metrics
 (NMAD / outlier fraction), fp32 soft-CE — items 2 (loss part) and 3–9
 of the 2026-06-09 roadmap entry.
+
+## 2026-06-09: pretrain_tokenizer.slurm — MANIFEST env override
+
+The script hardcoded `MANIFEST=$SCRATCH_OUT/manifests/dr1_${SLURM_JOB_ID}.jsonl`
+(job-id-named), so a manifest pre-built on an interactive node could
+never be reused — every submission rebuilt its own. Now
+`MANIFEST="${MANIFEST:-...}"` like train_transformer.slurm: pass
+`MANIFEST=... sbatch nersc/pretrain_tokenizer.slurm` to train on a
+pre-built (e.g. balanced v2) manifest.
