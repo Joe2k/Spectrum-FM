@@ -52,7 +52,15 @@ def parse_args():
     p.add_argument("--out", type=Path, required=True,
                    help="Output JSONL manifest path")
     p.add_argument("--max-healpix", type=int, default=None,
-                   help="Stop after this many healpix dirs (smoke test)")
+                   help="Stop after this many healpix dirs (smoke test). "
+                        "NOTE: global cap — fills up with the first "
+                        "(survey, program) pair scanned (e.g. all sv3/bright "
+                        "before any dark/main). For a balanced mix use "
+                        "--max-healpix-per-pair instead.")
+    p.add_argument("--max-healpix-per-pair", type=int, default=None,
+                   help="Cap healpix dirs kept per (survey, program) pair, "
+                        "so every requested survey × program contributes "
+                        "equally to the manifest.")
     p.add_argument("--hpix-stride", type=int, default=1,
                    help="Take every Nth healpix dir (subsample)")
     p.add_argument("--skip-row-count", action="store_true",
@@ -105,6 +113,7 @@ def main():
         for survey in args.surveys:
             for program in args.programs:
                 print(f"[{survey}/{program}] scanning...")
+                n_pair = 0
                 for k, (coadd, redrock, hpx) in enumerate(
                     walk_program(args.root, args.production, survey, program)
                 ):
@@ -122,6 +131,7 @@ def main():
                     }
                     fh.write(json.dumps(rec) + "\n")
                     n_kept += 1
+                    n_pair += 1
                     if n_rows > 0:
                         n_total_rows += n_rows
 
@@ -130,9 +140,16 @@ def main():
                         print(f"  {n_kept} healpix indexed, "
                               f"~{n_total_rows} rows, {dt:.1f}s")
 
+                    if (args.max_healpix_per_pair is not None
+                            and n_pair >= args.max_healpix_per_pair):
+                        print(f"  hit --max-healpix-per-pair="
+                              f"{args.max_healpix_per_pair} for "
+                              f"{survey}/{program}, next pair")
+                        break
                     if args.max_healpix is not None and n_kept >= args.max_healpix:
                         print(f"  hit --max-healpix={args.max_healpix}, stopping")
                         break
+                print(f"[{survey}/{program}] kept {n_pair} healpix")
                 if args.max_healpix is not None and n_kept >= args.max_healpix:
                     break
             if args.max_healpix is not None and n_kept >= args.max_healpix:

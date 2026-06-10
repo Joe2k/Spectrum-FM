@@ -166,6 +166,68 @@ If you ran offline, sync from a login node afterwards:
 wandb sync $SCRATCH/deepsrch/wandb/<run-name>
 ```
 
+## Redshift bins (`--z-bins`)
+
+`train_transformer.py` accepts `--z-bins` (default **256**, the legacy
+v8/v9 width). The redshift sub-vocab is the last block of the token
+vocabulary, so the total vocab is `1032 + z_bins` (1288 for 256;
+5128 for 4096). **4096 bins ≈ 0.001-level bin width**, matching the
+precision of spectroscopic redshifts — the recommended setting for new
+runs.
+
+Notes:
+
+- Checkpoints with different `--z-bins` have different embedding/head
+  shapes and are **not resumable into each other** — the trainer
+  refuses `--resume` on a bin-count mismatch.
+- Bins are CDF-equalized (equal probability mass), not uniform in z:
+  dense z regions get finer bins, tails get wider ones. The trainer
+  prints median/p90/max bin width in z at fit time — check that line to
+  confirm the precision you're actually getting.
+- 4096 quantiles need a large fit sample; the trainer warns when fewer
+  than ~20 samples/bin were gathered. Raise `--z-fit-files` if so.
+- `redshift_acc_within2` is ±2 *bins* — at 4096 bins it is 16× stricter
+  than at 256. Don't compare the metric across bin counts.
+- If using soft labels, `--redshift-soft-sigma` is in bins: the
+  256-bin value 1.5 corresponds to ~24 at 4096 bins.
+- Inference (`src/inference/release.py`) infers the vocab from the
+  checkpoint, so old and new models load through the same path.
+- SLURM passthrough: `Z_BINS=4096 sbatch nersc/train_transformer_ddp.slurm`.
+
+## Tokenizer v2: broadened training data
+
+`spectrum_tokenizer_v1` was trained on ~500k **SV3/bright-only**
+spectra. Root cause: `build_dr1_index.py --max-healpix` is a *global*
+cap filled sequentially, so the manifest never got past sv3/bright.
+This underrepresents dark-program targets (ELGs/LRGs/QSOs — fainter,
+lower SNR, higher z) and the main survey's selection.
+
+Fixes in place:
+
+- `build_dr1_index.py --max-healpix-per-pair N` caps each
+  (survey, program) pair separately → balanced manifests.
+- `pretrain_tokenizer.py --surveys ... --programs ...` filters an
+  existing manifest, and logs the per-(survey, program) record mix.
+- `pretrain_tokenizer.slurm` now defaults to
+  `MAX_HEALPIX_PER_PAIR=500` over `sv3 main × bright dark`
+  (≈ v1 data volume, but balanced) and names runs `tokenizer_v2_*`.
+
+Launch:
+
+```bash
+# default balanced recipe (sv3+main × bright+dark, 500 healpix each)
+sbatch nersc/pretrain_tokenizer.slurm
+
+# bigger: 1500 healpix per pair, longer schedule
+MAX_HEALPIX_PER_PAIR=1500 STEPS=200000 sbatch nersc/pretrain_tokenizer.slurm
+```
+
+Gate tokenizer_v2 on held-out reconstruction quality before swapping it
+into transformer training (AION's spectrum tokenizer reports R² = 0.994;
+ours should be measured on the same broadened distribution). Note that
+all transformer checkpoints are tied to the tokenizer codebook they were
+trained with — a new tokenizer means retraining the transformer.
+
 ## Redshift loss weighting
 
 `train_transformer.py` accepts `--redshift-loss-weight` (default **50.0**).
@@ -287,6 +349,7 @@ sweep without editing scripts:
 | `ENCODER_MASK_RATIO` | `--encoder-mask-ratio` | 0.15 |
 | `HEALPIX_HOLDOUT_FRAC` | `--healpix-holdout-frac` | 0.05 |
 | `AR_EVAL_BATCHES` | `--ar-eval-batches` | 4 |
+| `Z_BINS` | `--z-bins` | 256 |
 | `WANDB_MODE` | `--wandb-mode` | online |
 | `WANDB_PROJECT` | `--wandb-project` | redshifty |
 | `STEPS`, `BATCH_SIZE`, `LR`, `NUM_WORKERS` | — | see script |

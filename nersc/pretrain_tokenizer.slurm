@@ -25,17 +25,25 @@ module load "${PYTORCH_MODULE:-pytorch/2.8.0}"
 
 REPO=$(pwd)
 SCRATCH_OUT="$SCRATCH/deepsrch"
-RUN_NAME="${RUN_NAME:-tokenizer_v1_${SLURM_JOB_ID}}"
+RUN_NAME="${RUN_NAME:-tokenizer_v2_${SLURM_JOB_ID}}"
 
 # ---------- run-scale knobs ----------
-SURVEYS="sv3 main"
-PROGRAMS="bright dark"
-MAX_HEALPIX="${MAX_HEALPIX:-2000}"   # ~ a few hundred thousand spectra
+# v1 lesson: --max-healpix is a GLOBAL cap that build_dr1_index.py fills
+# sequentially, so the v1 manifest was ~all sv3/bright (~500k spectra).
+# Default to a per-(survey,program) cap so main/dark contribute equally.
+SURVEYS="${SURVEYS:-sv3 main}"
+PROGRAMS="${PROGRAMS:-bright dark}"
+MAX_HEALPIX_PER_PAIR="${MAX_HEALPIX_PER_PAIR:-500}"  # 4 pairs x 500 ≈ v1 volume, balanced
+MAX_HEALPIX="${MAX_HEALPIX:-}"       # legacy global cap; empty = unused
 STEPS="${STEPS:-100000}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 LR="${LR:-3e-4}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
 # -------------------------------------
+
+BUILD_FLAGS=""
+[ -n "$MAX_HEALPIX" ] && BUILD_FLAGS="$BUILD_FLAGS --max-healpix $MAX_HEALPIX"
+[ -n "$MAX_HEALPIX_PER_PAIR" ] && BUILD_FLAGS="$BUILD_FLAGS --max-healpix-per-pair $MAX_HEALPIX_PER_PAIR"
 
 MANIFEST="$SCRATCH_OUT/manifests/dr1_${SLURM_JOB_ID}.jsonl"
 # CFS mirror lives under the project CFS dir (multi-TB quota), not $HOME (40 GB).
@@ -43,7 +51,8 @@ DEFAULT_CFS_BASE="/global/cfs/cdirs/deepsrch/$USER/checkpoints"
 CFS_OUT="${CFS_OUT:-$DEFAULT_CFS_BASE/$RUN_NAME}"
 
 echo "[pretrain] run_name=$RUN_NAME"
-echo "[pretrain] manifest=$MANIFEST  (max_healpix=$MAX_HEALPIX)"
+echo "[pretrain] manifest=$MANIFEST  (surveys=$SURVEYS programs=$PROGRAMS"
+echo "[pretrain]  max_healpix_per_pair=${MAX_HEALPIX_PER_PAIR:-none} max_healpix=${MAX_HEALPIX:-none})"
 echo "[pretrain] cfs_out=$CFS_OUT"
 
 if [ ! -s "$MANIFEST" ]; then
@@ -52,7 +61,7 @@ if [ ! -s "$MANIFEST" ]; then
         --root /global/cfs/cdirs/desi/public/dr1 \
         --surveys $SURVEYS \
         --programs $PROGRAMS \
-        --max-healpix "$MAX_HEALPIX" \
+        $BUILD_FLAGS \
         --out "$MANIFEST"
 fi
 

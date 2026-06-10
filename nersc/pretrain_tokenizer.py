@@ -55,6 +55,12 @@ def parse_args():
                    help="JSONL manifest from build_dr1_index.py")
     p.add_argument("--max-spectra", type=int, default=None,
                    help="Cap dataset size (smoke test)")
+    p.add_argument("--surveys", nargs="*", default=None,
+                   help="Keep only these surveys from the manifest "
+                        "(e.g. sv3 main). Default: all records.")
+    p.add_argument("--programs", nargs="*", default=None,
+                   help="Keep only these programs from the manifest "
+                        "(e.g. bright dark). Default: all records.")
     p.add_argument("--val-frac", type=float, default=0.02,
                    help="Held-out fraction for validation")
     p.add_argument("--seed", type=int, default=42)
@@ -177,7 +183,23 @@ def main():
     # Data
     print(f"[data] loading manifest {args.manifest}")
     records = load_manifest(args.manifest)
-    print(f"[data] {len(records)} healpix records")
+    # Optional survey/program subsetting so one big DR1 manifest can drive
+    # multiple runs (e.g. tokenizer_v1 = sv3/bright only, v2 = sv3+main ×
+    # bright+dark). Records from build_dr1_index.py carry both fields.
+    if args.surveys:
+        keep = set(args.surveys)
+        records = [r for r in records if r.get("survey") in keep]
+    if args.programs:
+        keep = set(args.programs)
+        records = [r for r in records if r.get("program") in keep]
+    from collections import Counter
+    mix = Counter((r.get("survey"), r.get("program")) for r in records)
+    mix_str = " ".join(f"{s}/{p}={n}" for (s, p), n in sorted(mix.items()))
+    print(f"[data] {len(records)} healpix records ({mix_str})")
+    if not records:
+        print("ERROR: no manifest records left after --surveys/--programs "
+              "filtering", file=sys.stderr)
+        sys.exit(1)
 
     full = DR1IndexedDataset(
         records,
