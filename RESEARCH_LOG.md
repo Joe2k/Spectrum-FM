@@ -1402,3 +1402,51 @@ never be reused — every submission rebuilt its own. Now
 `MANIFEST="${MANIFEST:-...}"` like train_transformer.slurm: pass
 `MANIFEST=... sbatch nersc/pretrain_tokenizer.slurm` to train on a
 pre-built (e.g. balanced v2) manifest.
+
+---
+
+## 2026-06-09: Tokenizer v2 objective implemented (roadmap item 2, loss part)
+
+All four loss-side changes from the roadmap, in place before the v2
+training run:
+
+1. **ivar-weighted Gaussian NLL** (`recon_loss="nll"`, the new default in
+   `SpectrumTokenizer`): flux loss is `0.5 * ivar * (flux − flux̂)²`
+   averaged over ivar>0 pixels (AION Eq. 1). Scale-invariant (bright
+   spectra no longer dominate), noise-aware (low-SNR pixels are
+   down-weighted), and padding/masked pixels (ivar=0 from the collate)
+   drop out automatically. A small normalized-space MSE on the istd
+   channel (`istd_loss_weight=0.1`) keeps `decode()`'s channel 1
+   meaningful. Legacy v1 MSE retained as `recon_loss="mse"` for A/B.
+   Loss computed in fp32 under AMP.
+2. **LFQ entropy objective** (MAGVIT-v2): minimize per-sample binary
+   entropy of p(bit=+1)=sigmoid(2z/τ) (confident assignments), maximize
+   batch marginal bit entropy (both signs of every bit used). Factorizes
+   the 2^10-code entropy over bits. `entropy_weight=0.1`, τ=1.0.
+   Commitment alone invited dead codes; **codebook utilization is now
+   logged** (per-batch at train log steps, accumulated over the val
+   pass) so collapse is visible.
+3. **Held-out flux R²** (`flux_r2`, ivar>0 pixels, per-spectrum then
+   batch-averaged) computed every val pass — the gating metric for v2
+   (AION reference: 0.994). Saved into best.pt and the W&B artifact
+   metadata alongside codebook_use.
+4. **normalize() no-op removed**: `10^log10(norm+1) − 1 == norm`
+   round-trip deleted; numerically identical, so v1 checkpoints load
+   and tokenize unchanged (verified: no new parameters; full test suite
+   145 passed).
+
+Training entry points: `--recon-loss {nll,mse}` and `--entropy-weight`
+on `pretrain_tokenizer.py`, with `RECON_LOSS`/`ENTROPY_WEIGHT` env
+passthrough in both pretrain SLURM scripts (defaults: nll, 0.1).
+Quantizer API change: `LookUpFreeQuantizer.forward` returns a loss dict
+(`quant`/`commit`/`entropy_sample`/`entropy_codebook`) instead of a
+scalar; `SpectrumTokenizer.forward`'s dict keeps the `total`/`recon`/
+`quant` keys all existing consumers use, plus the new components.
+
+Loss-scale note: NLL ≈ mean per-pixel χ²/2, so val_loss values are not
+comparable to v1's denormalized-MSE numbers — compare on flux R².
+Remaining before launch: none code-side; build the balanced manifest
+(`dr1_v2_balanced_2k.jsonl`), stage to scratch, submit. Tests: entropy
+direction (confident+diverse < unconfident+collapsed), NLL component
+logging, ivar=0 exclusion, scale-invariance sanity, mse legacy mode,
+flux_r2 (perfect=1, mean-prediction≈0, masked-region exclusion).

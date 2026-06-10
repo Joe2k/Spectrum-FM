@@ -36,7 +36,7 @@ from torch.utils.data.distributed import DistributedSampler
 # Repo imports
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
-from src.tokenizers.spectrum import SpectrumTokenizer  # noqa: E402
+from src.tokenizers.spectrum import SpectrumTokenizer, flux_r2  # noqa: E402
 from src.training.wandb_util import init_wandb, log_model_artifact, wfinish, wlog  # noqa: E402
 
 # Local imports
@@ -64,6 +64,17 @@ def parse_args():
     p.add_argument("--val-frac", type=float, default=0.02,
                    help="Held-out fraction for validation")
     p.add_argument("--seed", type=int, default=42)
+
+    # Objective
+    p.add_argument("--recon-loss", choices=["nll", "mse"], default="nll",
+                   help="Reconstruction loss. 'nll' (default) = "
+                        "inverse-variance-weighted Gaussian NLL on flux "
+                        "(AION Eq. 1) + small istd aux MSE. 'mse' = legacy "
+                        "v1 denormalized MSE (for A/B comparison only).")
+    p.add_argument("--entropy-weight", type=float, default=0.1,
+                   help="LFQ entropy objective weight (confident per-token "
+                        "assignments, uniform marginal bit usage). "
+                        "0 disables (v1 behavior).")
 
     # Optim
     p.add_argument("--steps", type=int, default=10_000,
@@ -112,8 +123,12 @@ def lr_at(step: int, base_lr: float, warmup: int, total: int) -> float:
 
 
 def evaluate(model, loader, device, amp: bool, max_batches: int = 50):
+    """Held-out loss components + flux R^2 (the tokenizer gating metric,
+    AION reference: 0.994) + codebook utilization across the val pass."""
     model.eval()
-    losses = {"total": 0.0, "recon": 0.0, "quant": 0.0}
+    losses: dict = {}
+    r2_sum = 0.0
+    codes_seen = torch.zeros(model.codebook_size, dtype=torch.bool, device=device)
     n = 0
     with torch.no_grad():
         for i, batch in enumerate(loader):
@@ -126,13 +141,21 @@ def evaluate(model, loader, device, amp: bool, max_batches: int = 50):
             istd = torch.sqrt(ivar.clamp(min=1e-10))
             x = torch.stack([flux, istd], dim=1)
             with torch.amp.autocast("cuda", enabled=amp):
-                _, loss, _ = model(x)
-            for k in losses:
-                losses[k] += loss[k].item()
+                recon, loss, indices = model(x)
+            for k, v in loss.items():
+                losses[k] = losses.get(k, 0.0) + v.item()
+            # R^2 on the model grid (ivar > 0 pixels only)
+            x_grid = model.interpolate_to_grid(x)
+            r2_sum += flux_r2(x_grid[:, 0], recon[:, 0].float(),
+                              ivar=x_grid[:, 1].square()).item()
+            codes_seen[indices.unique()] = True
             n += 1
     if n == 0:
-        return {k: float("nan") for k in losses}
-    return {k: v / n for k, v in losses.items()}
+        return {k: float("nan") for k in ("total", "recon", "quant", "flux_r2", "codebook_use")}
+    out = {k: v / n for k, v in losses.items()}
+    out["flux_r2"] = r2_sum / n
+    out["codebook_use"] = codes_seen.float().mean().item()
+    return out
 
 
 def main():
@@ -241,7 +264,10 @@ def main():
     )
 
     # Model
-    model = SpectrumTokenizer().to(device)
+    model = SpectrumTokenizer(
+        recon_loss=args.recon_loss,
+        entropy_weight=args.entropy_weight,
+    ).to(device)
     if is_distributed:
         model = DDP(model, device_ids=[device.index], find_unused_parameters=False)
     n_params = sum(p.numel() for p in model.parameters())
@@ -305,7 +331,7 @@ def main():
 
         optim.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda", enabled=args.amp):
-            _, loss, _ = model(x)
+            _, loss, indices = model(x)
 
         scaler.scale(loss["total"]).backward()
         if args.grad_clip > 0:
@@ -317,13 +343,14 @@ def main():
         if rank == 0 and step % args.log_every == 0:
             dt = time.time() - t_start
             rate = (step + 1) / max(dt, 1e-6)
+            n_codes = (model.module if is_distributed else model).codebook_size
+            batch_codebook_use = indices.unique().numel() / n_codes
             msg = {
                 "kind": "train",
                 "step": step,
                 "lr": optim.param_groups[0]["lr"],
-                "loss_total": float(loss["total"].item()),
-                "loss_recon": float(loss["recon"].item()),
-                "loss_quant": float(loss["quant"].item()),
+                **{f"loss_{k}": float(v.item()) for k, v in loss.items()},
+                "codebook_use": batch_codebook_use,
                 "steps_per_sec": rate,
                 "elapsed_s": dt,
             }
@@ -331,14 +358,14 @@ def main():
                 f"[step {step:6d}] "
                 f"loss={msg['loss_total']:.4f} "
                 f"(recon={msg['loss_recon']:.4f}, quant={msg['loss_quant']:.4f}) "
+                f"codes={batch_codebook_use:.2f} "
                 f"lr={msg['lr']:.2e} {rate:.1f} step/s"
             )
             with metrics_path.open("a") as f:
                 f.write(json.dumps(msg) + "\n")
             wlog(wandb_run, {
-                "train/loss_total": msg["loss_total"],
-                "train/loss_recon": msg["loss_recon"],
-                "train/loss_quant": msg["loss_quant"],
+                **{f"train/loss_{k}": float(v.item()) for k, v in loss.items()},
+                "train/codebook_use": batch_codebook_use,
                 "train/lr": msg["lr"],
                 "train/steps_per_sec": rate,
             }, step=step)
@@ -363,6 +390,8 @@ def main():
                     "optim": optim.state_dict(),
                     "scaler": scaler.state_dict(),
                     "val_loss": best_val,
+                    "val_flux_r2": val_losses.get("flux_r2"),
+                    "val_codebook_use": val_losses.get("codebook_use"),
                     "args": vars(args) | {"manifest": str(args.manifest)},
                 }
                 p = run_dir / "best.pt"
@@ -383,6 +412,10 @@ def main():
                         aliases=["best", f"step_{step}"],
                         metadata={
                             "val_loss": best_val,
+                            "val_flux_r2": val_losses.get("flux_r2"),
+                            "val_codebook_use": val_losses.get("codebook_use"),
+                            "recon_loss": args.recon_loss,
+                            "entropy_weight": args.entropy_weight,
                             "step": step,
                             "full_state": True,
                         },

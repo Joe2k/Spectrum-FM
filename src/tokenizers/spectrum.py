@@ -128,16 +128,30 @@ class LookUpFreeQuantizer(nn.Module):
     Each dimension is quantized to {-1, +1}, giving exactly 2^dim codes.
     With dim=10, codebook_size = 2^10 = 1024.
 
-    Uses straight-through estimator with commitment loss.
+    Uses straight-through estimator with commitment loss, plus the
+    MAGVIT-v2 entropy objective: minimize per-sample assignment entropy
+    (confident bit assignments) while maximizing batch codebook entropy
+    (both signs of every bit used) — without it, commitment alone
+    invites dead codes. The 2^dim-code entropy factorizes over bits
+    under the LFQ independence assumption, so both terms are computed
+    per dimension from p(bit=+1) = sigmoid(2 z / temperature).
     """
 
-    def __init__(self, dim=10, codebook_size=1024, commitment_weight=0.25):
+    def __init__(self, dim=10, codebook_size=1024, commitment_weight=0.25,
+                 entropy_weight=0.1, entropy_temperature=1.0):
         super().__init__()
         self.dim = dim
         self.codebook_size = codebook_size
         self.commitment_weight = commitment_weight
+        self.entropy_weight = entropy_weight
+        self.entropy_temperature = entropy_temperature
 
         self.project_in = nn.Conv1d(dim, dim, kernel_size=1)
+
+    @staticmethod
+    def _binary_entropy(p: torch.Tensor) -> torch.Tensor:
+        p = p.clamp(1e-6, 1 - 1e-6)
+        return -(p * torch.log(p) + (1 - p) * torch.log(1 - p))
 
     def forward(self, z):
         """Quantize latents.
@@ -147,7 +161,8 @@ class LookUpFreeQuantizer(nn.Module):
 
         Returns:
             z_q: (B, dim, L) quantized latent
-            loss: quantization loss
+            losses: dict with "quant" (total, backprop this), "commit",
+                "entropy_sample", "entropy_codebook"
             indices: (B, L) token indices
         """
         z = self.project_in(z)
@@ -159,14 +174,28 @@ class LookUpFreeQuantizer(nn.Module):
         z_q = z + (z_q - z).detach()
 
         # Commitment loss (pull z toward +/-1)
-        loss = F.mse_loss(z, torch.sign(z).detach()) * self.commitment_weight
+        commit = F.mse_loss(z.float(), torch.sign(z).detach().float()) * self.commitment_weight
+
+        # Entropy objective (fp32 for AMP stability)
+        p = torch.sigmoid(2.0 * z.float() / self.entropy_temperature)  # (B, dim, L)
+        ent_sample = self._binary_entropy(p).mean()
+        p_bar = p.mean(dim=(0, 2))  # (dim,) marginal bit usage over the batch
+        ent_codebook = self._binary_entropy(p_bar).mean()
+        entropy_aux = ent_sample - ent_codebook  # minimize: confident AND diverse
+
+        losses = {
+            "quant": commit + self.entropy_weight * entropy_aux,
+            "commit": commit,
+            "entropy_sample": ent_sample,
+            "entropy_codebook": ent_codebook,
+        }
 
         # Compute indices: binary to integer
         bits = ((z_q + 1) / 2).long()  # (B, dim, L) with values {0, 1}
         powers = torch.arange(self.dim, device=z.device).view(1, -1, 1)
         indices = (bits * (2 ** powers)).sum(dim=1)  # (B, L)
 
-        return z_q, loss, indices
+        return z_q, losses, indices
 
     def encode(self, z):
         """Encode to discrete indices."""
@@ -205,8 +234,16 @@ class SpectrumTokenizer(nn.Module):
         encoder_dims: Channel dimensions per stage
         decoder_depths: Number of ConvNeXt blocks per stage
         decoder_dims: Channel dimensions per stage
+        recon_loss: "nll" (default) = inverse-variance-weighted Gaussian
+            NLL on the flux channel (AION Eq. 1) + a small normalized-space
+            MSE on the istd channel. "mse" = legacy plain MSE on the
+            denormalized 2-channel output (v1 behavior; bright spectra and
+            noisy pixels dominate — kept for A/B comparison only).
+        entropy_weight: weight of the LFQ entropy objective (0 disables).
+        istd_loss_weight: weight of the istd-channel auxiliary MSE in
+            "nll" mode (keeps decode()'s channel 1 meaningful).
     """
-    
+
     def __init__(
         self,
         in_channels=2,
@@ -218,13 +255,20 @@ class SpectrumTokenizer(nn.Module):
         decoder_depths=(3, 3, 9, 3),
         decoder_dims=(384, 192, 96, 96),
         commitment_weight=0.25,
+        recon_loss="nll",
+        entropy_weight=0.1,
+        istd_loss_weight=0.1,
     ):
         super().__init__()
-        
+
+        if recon_loss not in ("nll", "mse"):
+            raise ValueError(f"recon_loss must be 'nll' or 'mse', got {recon_loss!r}")
         self.in_channels = in_channels
         self.latent_channels = latent_channels
         self.embedding_dim = embedding_dim
         self.codebook_size = codebook_size
+        self.recon_loss = recon_loss
+        self.istd_loss_weight = istd_loss_weight
         
         # === ENCODER ===
         self.encoder_stem = nn.Sequential(
@@ -252,6 +296,7 @@ class SpectrumTokenizer(nn.Module):
             dim=embedding_dim,
             codebook_size=codebook_size,
             commitment_weight=commitment_weight,
+            entropy_weight=entropy_weight,
         )
         
         # Post-quantization projection
@@ -366,13 +411,9 @@ class SpectrumTokenizer(nn.Module):
         # Compute robust median (mean of positive flux)
         positive_mask = flux > 0
         norm = (flux * positive_mask.float()).sum(dim=-1) / (positive_mask.sum(dim=-1).float() + 1.0)
-        norm = torch.clamp(norm, min=0.1)  # Avoid division by zero
-        
-        # log10 compression of normalization factor
-        norm_log = torch.log10(norm + 1.0)
-        
-        # Denormalization factor
-        denorm = torch.clamp(10 ** norm_log - 1.0, min=0.1)
+        # Denormalization factor. (A previous version round-tripped this
+        # through 10^log10(norm+1) - 1, which is exactly `norm` — removed.)
+        denorm = torch.clamp(norm, min=0.1)
         
         # Normalize flux and istd
         flux_norm = (flux / denorm.unsqueeze(-1) - 1.0) * 0.2
@@ -434,30 +475,80 @@ class SpectrumTokenizer(nn.Module):
         h = self.quant_conv(h)
         
         # Quantize
-        h_q, quant_loss, indices = self.quantizer(h)
-        
+        h_q, quant_losses, indices = self.quantizer(h)
+
         # Decode
         h = self.post_quant_conv(h_q)
         for stage in self.decoder_stages:
             for block in stage:
                 h = block(h)
-        
+
         recon_norm = self.decoder_head(h)
-        
+
         # Denormalize
         recon = self.denormalize(recon_norm, denorm)
-        
-        # Reconstruction loss (on interpolated grid, denormalized)
-        recon_loss = F.mse_loss(recon, x_grid)
-        
-        
-        loss = {
-            "total": recon_loss + quant_loss,
-            "recon": recon_loss,
-            "quant": quant_loss,
-        }
-        
+
+        # Reconstruction loss (fp32 for AMP stability).
+        loss = {"quant": quant_losses["quant"], **{k: v for k, v in quant_losses.items() if k != "quant"}}
+        if self.recon_loss == "nll":
+            # Inverse-variance-weighted Gaussian NLL on flux (AION Eq. 1):
+            # 0.5 * ivar * (flux - flux_hat)^2, averaged over pixels with
+            # ivar > 0. ivar weighting makes the loss scale-invariant
+            # (bright spectra don't dominate) and zeroes out padded /
+            # fully-masked pixels (collate sets their ivar to 0).
+            flux_true = x_grid[:, 0].float()
+            istd_true = x_grid[:, 1].float()
+            ivar = istd_true.square()
+            flux_rec = recon[:, 0].float()
+            valid = (ivar > 0).float()
+            n_valid = valid.sum().clamp(min=1.0)
+            nll = (0.5 * ivar * (flux_true - flux_rec).square() * valid).sum() / n_valid
+            # Auxiliary istd-channel MSE in normalized space, so the
+            # decoder's channel 1 stays meaningful for decode() callers.
+            istd_mse = F.mse_loss(recon_norm[:, 1].float(), x_norm[:, 1].float())
+            recon_loss = nll + self.istd_loss_weight * istd_mse
+            loss["nll_flux"] = nll
+            loss["istd_mse"] = istd_mse
+        else:
+            # Legacy v1 objective: plain MSE on the denormalized 2-channel
+            # output. Scales with brightness^2 and weights noisy pixels
+            # equally — kept only for A/B comparison.
+            recon_loss = F.mse_loss(recon.float(), x_grid.float())
+
+        loss["recon"] = recon_loss
+        loss["total"] = recon_loss + loss["quant"]
+
         return recon, loss, indices
+
+
+def flux_r2(flux_true: torch.Tensor, flux_recon: torch.Tensor,
+            ivar: torch.Tensor = None) -> torch.Tensor:
+    """Mean per-spectrum R^2 of the flux reconstruction.
+
+    The tokenizer-quality gating metric (AION's spectrum tokenizer
+    reports R^2 = 0.994). Computed per spectrum over pixels with
+    ivar > 0 (all pixels if ivar is None), then averaged over the batch.
+
+    Args:
+        flux_true: (B, L) input flux on the model grid
+        flux_recon: (B, L) reconstructed flux
+        ivar: (B, L) optional inverse variance; pixels with ivar == 0
+            (padding / fully masked) are excluded
+
+    Returns:
+        scalar tensor, mean R^2 over the batch
+    """
+    flux_true = flux_true.float()
+    flux_recon = flux_recon.float()
+    if ivar is None:
+        valid = torch.ones_like(flux_true)
+    else:
+        valid = (ivar > 0).float()
+    n = valid.sum(dim=-1).clamp(min=1.0)
+    mean = (flux_true * valid).sum(dim=-1, keepdim=True) / n.unsqueeze(-1)
+    ss_res = ((flux_true - flux_recon).square() * valid).sum(dim=-1)
+    ss_tot = ((flux_true - mean).square() * valid).sum(dim=-1).clamp(min=1e-12)
+    return (1.0 - ss_res / ss_tot).mean()
 
 
 def test_tokenizer_shapes():

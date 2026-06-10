@@ -38,6 +38,8 @@ MAX_HEALPIX="${MAX_HEALPIX:-}"       # legacy global cap; empty = unused
 STEPS="${STEPS:-100000}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 LR="${LR:-3e-4}"
+RECON_LOSS="${RECON_LOSS:-nll}"
+ENTROPY_WEIGHT="${ENTROPY_WEIGHT:-0.1}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
 # -------------------------------------
 
@@ -75,6 +77,8 @@ srun -n 1 -c 32 -G 1 python "$REPO/nersc/pretrain_tokenizer.py" \
     --steps "$STEPS" \
     --batch-size "$BATCH_SIZE" \
     --lr "$LR" \
+    --recon-loss "$RECON_LOSS" \
+    --entropy-weight "$ENTROPY_WEIGHT" \
     --num-workers "$NUM_WORKERS" \
     --amp
 

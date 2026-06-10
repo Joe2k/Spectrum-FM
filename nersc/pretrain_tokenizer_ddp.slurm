@@ -34,6 +34,8 @@ MAX_HEALPIX="${MAX_HEALPIX:-10000}"
 STEPS="${STEPS:-200000}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 LR="${LR:-1.2e-3}"
+RECON_LOSS="${RECON_LOSS:-nll}"
+ENTROPY_WEIGHT="${ENTROPY_WEIGHT:-0.1}"
 NUM_WORKERS="${NUM_WORKERS:-12}"
 # -------------------------------------
 
@@ -77,6 +79,8 @@ srun python "$REPO/nersc/pretrain_tokenizer.py" \
     --steps "$STEPS" \
     --batch-size "$BATCH_SIZE" \
     --lr "$LR" \
+    --recon-loss "$RECON_LOSS" \
+    --entropy-weight "$ENTROPY_WEIGHT" \
     --num-workers "$NUM_WORKERS" \
     --amp
 
