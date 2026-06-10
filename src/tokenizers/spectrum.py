@@ -138,11 +138,15 @@ class LookUpFreeQuantizer(nn.Module):
 
     Uses straight-through estimator with commitment loss, plus the
     MAGVIT-v2 entropy objective: minimize per-sample assignment entropy
-    (confident bit assignments) while maximizing batch codebook entropy
-    (both signs of every bit used) — without it, commitment alone
-    invites dead codes. The 2^dim-code entropy factorizes over bits
-    under the LFQ independence assumption, so both terms are computed
-    per dimension from p(bit=+1) = sigmoid(2 z / temperature).
+    (confident assignments) while maximizing batch codebook entropy
+    (all codes used) — without it, commitment alone invites dead codes.
+
+    The entropy is computed EXACTLY over all 2^dim codes via
+    p(code k | z) = softmax(2 z·c_k / temperature). A per-bit factorized
+    version was tried first and is blind to bit *correlation*: the
+    tokenizer_v2_trial run showed near-ceiling per-bit marginal entropy
+    while only ~30/1024 joint codes were alive. At dim=10 the exact
+    1024-way distribution costs a (B·L, 1024) softmax — trivial.
     """
 
     def __init__(self, dim=10, codebook_size=1024, commitment_weight=0.25,
@@ -156,10 +160,12 @@ class LookUpFreeQuantizer(nn.Module):
 
         self.project_in = nn.Conv1d(dim, dim, kernel_size=1)
 
-    @staticmethod
-    def _binary_entropy(p: torch.Tensor) -> torch.Tensor:
-        p = p.clamp(1e-6, 1 - 1e-6)
-        return -(p * torch.log(p) + (1 - p) * torch.log(1 - p))
+        # All 2^dim codewords in {-1,+1}^dim. Bit order matches the index
+        # encoding below (bit i = 2^i). Non-persistent: not in state_dict,
+        # so existing (v1) checkpoints load unchanged.
+        idx = torch.arange(codebook_size)
+        bits = ((idx.unsqueeze(1) >> torch.arange(dim)) & 1) * 2 - 1
+        self.register_buffer("codewords", bits.float(), persistent=False)
 
     def forward(self, z):
         """Quantize latents.
@@ -184,11 +190,18 @@ class LookUpFreeQuantizer(nn.Module):
         # Commitment loss (pull z toward +/-1)
         commit = F.mse_loss(z.float(), torch.sign(z).detach().float()) * self.commitment_weight
 
-        # Entropy objective (fp32 for AMP stability)
-        p = torch.sigmoid(2.0 * z.float() / self.entropy_temperature)  # (B, dim, L)
-        ent_sample = self._binary_entropy(p).mean()
-        p_bar = p.mean(dim=(0, 2))  # (dim,) marginal bit usage over the batch
-        ent_codebook = self._binary_entropy(p_bar).mean()
+        # Exact joint entropy objective over all 2^dim codes (fp32 for AMP
+        # stability). For binary codewords, -||z - c_k||^2 = 2 z·c_k + const,
+        # so p(code k | z) = softmax(2 z·c_k / tau). Entropies are in nats
+        # (max = ln codebook_size, e.g. 6.93 for 1024).
+        zf = z.float()
+        logits = torch.einsum("bdl,kd->bkl", zf, self.codewords) \
+            * (2.0 / self.entropy_temperature)              # (B, K, L)
+        logp = F.log_softmax(logits, dim=1)
+        p = logp.exp()
+        ent_sample = -(p * logp).sum(dim=1).mean()
+        p_bar = p.mean(dim=(0, 2))                           # (K,) batch marginal
+        ent_codebook = -(p_bar * p_bar.clamp_min(1e-12).log()).sum()
         entropy_aux = ent_sample - ent_codebook  # minimize: confident AND diverse
 
         losses = {

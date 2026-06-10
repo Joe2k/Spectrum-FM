@@ -364,3 +364,49 @@ class TestWavelengthResampling:
         assert out[0, 0, 130] == 1.0
         assert out[1, 0, 130] == 0.0
         assert out[1, 0, 630] == 1.0
+
+
+class TestJointEntropy:
+    """The joint entropy must see bit correlation that the per-bit
+    factorized entropy is blind to (observed in tokenizer_v2_trial:
+    near-max per-bit marginal entropy, but only ~30/1024 codes alive)."""
+
+    def _lfq_identity(self, dim=6):
+        lfq = LookUpFreeQuantizer(dim=dim, codebook_size=2 ** dim,
+                                  entropy_weight=1.0)
+        with torch.no_grad():
+            lfq.project_in.weight.copy_(torch.eye(dim).unsqueeze(-1))
+            lfq.project_in.bias.zero_()
+        return lfq
+
+    def test_correlated_bits_low_codebook_entropy(self):
+        dim = 6
+        lfq = self._lfq_identity(dim)
+        # Correlated: every bit shares one sign per token; half the tokens
+        # are +, half are -. Per-bit marginals are perfectly balanced, but
+        # only 2 of 64 codes ever occur.
+        n = 64
+        signs = torch.ones(1, dim, n) * 5.0
+        signs[..., n // 2:] *= -1.0
+        _, l_corr, idx_corr = lfq(signs)
+        assert idx_corr.unique().numel() == 2
+
+        # Diverse: every one of the 64 codes occurs once.
+        codes = lfq.codewords.t().unsqueeze(0) * 5.0  # (1, dim, 64)
+        _, l_div, idx_div = lfq(codes)
+        assert idx_div.unique().numel() == 64
+
+        # Joint codebook entropy must separate the two regimes sharply.
+        assert l_corr["entropy_codebook"].item() < 1.0   # ~ln 2
+        assert l_div["entropy_codebook"].item() > 3.5    # ~ln 64 = 4.16
+        # And the minimized auxiliary prefers the diverse configuration.
+        aux_corr = l_corr["entropy_sample"] - l_corr["entropy_codebook"]
+        aux_div = l_div["entropy_sample"] - l_div["entropy_codebook"]
+        assert aux_div.item() < aux_corr.item()
+
+    def test_entropy_gradient_flows_to_z(self):
+        lfq = self._lfq_identity(4)
+        z = torch.randn(2, 4, 8, requires_grad=True)
+        _, losses, _ = lfq(z)
+        (losses["entropy_sample"] - losses["entropy_codebook"]).backward()
+        assert z.grad is not None and torch.isfinite(z.grad).all()

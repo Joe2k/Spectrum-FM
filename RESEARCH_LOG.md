@@ -1487,3 +1487,37 @@ passes the kwarg when set, so tokenizer stubs/wrappers keep working).
 Tests: DESI offset-125 exact copy, out-of-coverage zeros, SDSS-like
 log-spaced roundtrip (<5e-3), per-row (B, L) wavelengths, legacy-path
 bit-equality. Suite: 151 passed.
+
+## 2026-06-10: tokenizer_v2_trial findings → exact joint LFQ entropy
+
+First v2 trial (run `f9s2dy8k`, 2k steps, 3k balanced manifest, NLL +
+factorized entropy + wavelength-aware): pipeline is healthy — no NaN,
+~1.7-1.9 steps/s staged, val nll_flux 1.80 → 0.99 (reconstruction
+approaching the pixel-noise floor), val flux_r2 0.23 → 0.27 and
+climbing. But the new codebook logging caught **collapse**: only ~30 of
+1024 codes alive per batch (val-pass accumulation 17 → 79 codes by step
+1500). Diagnosis: per-bit marginal entropy was already near ceiling
+(0.59-0.68 vs ln2=0.693) while joint usage stayed ~3% — the bits are
+balanced individually but heavily **correlated**, and the factorized
+entropy term is mathematically blind to correlation. v1 almost
+certainly had the same disease, unmeasured.
+
+Fix: replaced the factorized term with the **exact joint entropy over
+all 2^dim codes** (what MAGVIT-v2 actually computes; their grouping
+trick is only needed for codebooks far larger than our 1024). For
+binary codewords −‖z−c_k‖² = 2 z·c_k + const, so
+p(code k | z) = softmax(2 z·c_k / τ); minimize mean per-sample entropy,
+maximize entropy of the batch-marginal code distribution. Cost: a
+(B·273, 1024) softmax ≈ 100 MB fp32 at batch 32 — negligible.
+Entropies are now in nats over the code axis (max ln1024 = 6.93, vs the
+old per-bit ≤ 0.693) — W&B `entropy_*` scales are NOT comparable across
+the two trial runs. Codewords buffer is non-persistent → state_dict
+unchanged, v1 checkpoints load as before.
+
+Tests: correlated-bits regression (balanced marginals, 2/64 codes →
+codebook entropy ~ln2; diverse → ~ln64; auxiliary prefers diverse),
+gradient-flow check. Suite: 153 passed.
+
+Next: rerun the same 2k trial (`tokenizer_v2_trial_jointent`) and
+compare train/codebook_use at equal steps vs `f9s2dy8k`; launch the
+24h run with whichever wins (expect joint).
