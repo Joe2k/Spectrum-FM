@@ -25,8 +25,10 @@ Special Tokens:
 
 Token Offsets:
   Spectrum tokens:  LFQ_index + 8        (range: 8-1031)
-  Redshift tokens:  FSQ_index + 1032     (range: 1032-1287)
-  Total vocab size: 1288
+  Redshift tokens:  FSQ_index + 1032     (range: 1032 .. 1032+n_z_bins-1)
+  Total vocab size: 1032 + n_z_bins
+    n_z_bins = 256  -> 1288 (legacy default; v8/v9 checkpoints)
+    n_z_bins = 4096 -> 5128 (~0.001-level z bin width)
 """
 
 import math
@@ -47,7 +49,18 @@ SPEC_SEP_TOKEN = 5
 # Token offsets
 SPECTRUM_TOKEN_OFFSET = 8
 REDSHIFT_TOKEN_OFFSET = 1032
-TOTAL_VOCAB_SIZE = 1288
+N_REDSHIFT_BINS = 256  # legacy default; pass --z-bins to override
+TOTAL_VOCAB_SIZE = 1288  # = vocab_size_for_z_bins(N_REDSHIFT_BINS)
+
+
+def vocab_size_for_z_bins(n_z_bins: int) -> int:
+    """Total vocab size when the redshift sub-vocab has `n_z_bins` bins.
+
+    The redshift tokens are the last block of the vocabulary, so widening
+    them (e.g. 256 -> 4096 for ~0.001-level z bins) only grows the vocab;
+    special-token IDs and spectrum-token offsets are unchanged.
+    """
+    return REDSHIFT_TOKEN_OFFSET + n_z_bins
 
 
 class RMSNorm(nn.Module):
@@ -475,7 +488,7 @@ class SpectrumTransformer(nn.Module):
             (meaningless) value that the caller zeroes via the valid mask.
         """
         B, V = red_logits.shape
-        n_bins = V - REDSHIFT_TOKEN_OFFSET  # redshift sub-vocab width (256)
+        n_bins = V - REDSHIFT_TOKEN_OFFSET  # redshift sub-vocab width (e.g. 256, 4096)
         true_bin = (red_targets - REDSHIFT_TOKEN_OFFSET).clamp(0, n_bins - 1).float()  # (B,)
         bins = torch.arange(n_bins, device=red_logits.device, dtype=red_logits.dtype)
         # (B, n_bins) Gaussian over bin index, normalized per row.
@@ -573,8 +586,8 @@ def decode_redshift_token(token_id: torch.Tensor) -> torch.Tensor:
 def is_spectrum_token(token_id: torch.Tensor) -> torch.Tensor:
     return (token_id >= SPECTRUM_TOKEN_OFFSET) & (token_id < REDSHIFT_TOKEN_OFFSET)
 
-def is_redshift_token(token_id: torch.Tensor) -> torch.Tensor:
-    return (token_id >= REDSHIFT_TOKEN_OFFSET) & (token_id < TOTAL_VOCAB_SIZE)
+def is_redshift_token(token_id: torch.Tensor, vocab_size: int = TOTAL_VOCAB_SIZE) -> torch.Tensor:
+    return (token_id >= REDSHIFT_TOKEN_OFFSET) & (token_id < vocab_size)
 
 
 def build_encoder_input(

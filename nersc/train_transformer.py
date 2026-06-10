@@ -44,7 +44,7 @@ sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 
 # Core logic — moved to src/training/ for reusability.
-from src.models.transformer import SpectrumTransformer  # noqa: E402
+from src.models.transformer import SpectrumTransformer, vocab_size_for_z_bins  # noqa: E402
 from src.tokenizers.redshift import RedshiftTokenizer  # noqa: E402
 from src.tokenizers.spectrum import SpectrumTokenizer  # noqa: E402
 from src.training.data_split import split_records_by_healpix  # noqa: E402
@@ -86,6 +86,12 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--z-fit-files", type=int, default=200,
                    help="How many redrock files to scan when fitting RedshiftTokenizer")
+    p.add_argument("--z-bins", type=int, default=256,
+                   help="Number of redshift quantization bins (CDF-equalized). "
+                        "256 is the legacy default (v8/v9); 4096 gives "
+                        "~0.001-level bin width, matching spectroscopic z "
+                        "precision. Grows the vocab to 1032 + z_bins, so "
+                        "checkpoints with different --z-bins are incompatible.")
 
     # Approach
     p.add_argument("--approach", choices=["a", "b"], required=True)
@@ -235,8 +241,18 @@ def main():
     print(f"[tok] fitting redshift tokenizer on up to {args.z_fit_files} redrock files")
     zs = collect_redshifts(train_records, max_files=args.z_fit_files)
     print(f"[tok]   gathered {len(zs)} z values, min={zs.min():.4f} max={zs.max():.4f}")
-    z_tok = RedshiftTokenizer(n_levels=256)
+    if len(zs) < 20 * args.z_bins:
+        print(f"[tok]   WARN: only {len(zs)} z values for {args.z_bins} bins "
+              f"(<20 per quantile); raise --z-fit-files for stable bin edges")
+    z_tok = RedshiftTokenizer(n_levels=args.z_bins)
     z_tok.fit(zs)
+    # Bin-width report: bins are CDF-equalized (equal probability mass), so
+    # width varies with the z density — verify the precision actually achieved.
+    edges = z_tok.get_bin_edges()
+    widths = (edges[1:] - edges[:-1]).abs()
+    print(f"[tok]   z_bins={args.z_bins} bin width in z: "
+          f"median={widths.median():.5f} p90={widths.quantile(0.9):.5f} "
+          f"max={widths.max():.5f}")
 
     # Build separate datasets for each partition.
     train_ds = DR1IndexedDataset(
@@ -274,8 +290,9 @@ def main():
         pin_memory=device.type == "cuda",
     )
 
-    # Model
+    # Model — vocab grows with the redshift sub-vocab width.
     model = SpectrumTransformer(
+        vocab_size=vocab_size_for_z_bins(args.z_bins),
         d_model=args.d_model,
         n_encoder_layers=args.n_encoder_layers,
         n_decoder_layers=args.n_decoder_layers,
@@ -298,6 +315,12 @@ def main():
     resume_wandb_id = None
     if args.resume is not None:
         rckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        ck_bins = (rckpt.get("z_tokenizer") or {}).get("n_levels")
+        if ck_bins is not None and int(ck_bins) != args.z_bins:
+            raise ValueError(
+                f"--resume checkpoint was trained with {ck_bins} redshift bins "
+                f"but --z-bins={args.z_bins}; the vocab sizes differ. "
+                f"Resume with --z-bins {ck_bins} or start a fresh run.")
         (model.module if is_distributed else model).load_state_dict(rckpt["model"])
         if "optim" in rckpt:
             optim.load_state_dict(rckpt["optim"])
@@ -484,6 +507,7 @@ def main():
                             "redshift_mask_ratio": args.redshift_mask_ratio,
                             "redshift_soft_sigma": args.redshift_soft_sigma,
                             "redshift_loss_weight": args.redshift_loss_weight,
+                            "z_bins": args.z_bins,
                             "full_state": True,
                         },
                     )

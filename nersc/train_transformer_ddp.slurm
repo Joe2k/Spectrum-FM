@@ -62,6 +62,7 @@ REDSHIFT_LOSS_WEIGHT="${REDSHIFT_LOSS_WEIGHT:-10.0}"
 ENCODER_MASK_RATIO="${ENCODER_MASK_RATIO:-0.50}"
 HEALPIX_HOLDOUT_FRAC="${HEALPIX_HOLDOUT_FRAC:-0.05}"
 AR_EVAL_BATCHES="${AR_EVAL_BATCHES:-8}"
+Z_BINS="${Z_BINS:-256}"
 WANDB_MODE_ARG="${WANDB_MODE:-online}"
 WANDB_PROJECT="${WANDB_PROJECT:-redshifty}"
 # -------------------------------------
@@ -115,6 +116,7 @@ srun python "$REPO/nersc/train_transformer.py" \
     --encoder-mask-ratio "$ENCODER_MASK_RATIO" \
     --healpix-holdout-frac "$HEALPIX_HOLDOUT_FRAC" \
     --ar-eval-batches "$AR_EVAL_BATCHES" \
+    --z-bins "$Z_BINS" \
     --wandb-mode "$WANDB_MODE_ARG" \
     --wandb-project "$WANDB_PROJECT" \
     --amp

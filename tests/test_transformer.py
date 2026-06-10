@@ -364,3 +364,55 @@ class TestSequenceBuilding:
         # Both should have loss
         assert loss_a is not None
         assert loss_b is not None
+
+
+class TestConfigurableZBins:
+    """Vocab grows with the redshift sub-vocab width (--z-bins)."""
+
+    def test_vocab_size_helper(self):
+        from src.models.transformer import vocab_size_for_z_bins
+        assert vocab_size_for_z_bins(256) == TOTAL_VOCAB_SIZE == 1288
+        assert vocab_size_for_z_bins(4096) == 5128
+
+    def test_forward_with_4096_bins(self):
+        from src.models.transformer import vocab_size_for_z_bins
+        V = vocab_size_for_z_bins(4096)
+        model = SpectrumTransformer(
+            vocab_size=V, d_model=64, n_encoder_layers=1,
+            n_decoder_layers=1, n_heads=4,
+        )
+        # Encoder/decoder sequences using a high redshift bin (>1287, i.e.
+        # out of range for the legacy 256-bin vocab).
+        rz = REDSHIFT_TOKEN_OFFSET + 4000
+        enc = torch.tensor([[SOS_TOKEN, rz, SPECTRUM_TOKEN_OFFSET + 5, EOS_TOKEN]])
+        dec = torch.tensor([[SOS_TOKEN, rz, SPECTRUM_TOKEN_OFFSET + 5]])
+        tgt = torch.tensor([[rz, SPECTRUM_TOKEN_OFFSET + 5, EOS_TOKEN]])
+        logits, loss = model(enc, dec, targets=tgt)
+        assert logits.shape == (1, 3, V)
+        assert torch.isfinite(loss)
+
+    def test_soft_ce_adapts_to_wider_vocab(self):
+        """_redshift_soft_ce derives n_bins from logits width, not constants."""
+        from src.models.transformer import vocab_size_for_z_bins
+        V = vocab_size_for_z_bins(4096)
+        model = SpectrumTransformer(
+            vocab_size=V, d_model=64, n_encoder_layers=1,
+            n_decoder_layers=1, n_heads=4,
+        )
+        true_bin = 4000
+        tgt = torch.tensor([REDSHIFT_TOKEN_OFFSET + true_bin])
+        near = torch.zeros(1, V)
+        near[0, REDSHIFT_TOKEN_OFFSET + true_bin + 1] = 10.0
+        far = torch.zeros(1, V)
+        far[0, REDSHIFT_TOKEN_OFFSET + true_bin + 80] = 10.0
+        ce_near = model._redshift_soft_ce(near, tgt, sigma=1.5)
+        ce_far = model._redshift_soft_ce(far, tgt, sigma=1.5)
+        assert ce_near.item() < ce_far.item()
+
+    def test_is_redshift_token_wider_vocab(self):
+        from src.models.transformer import vocab_size_for_z_bins
+        V = vocab_size_for_z_bins(4096)
+        tok = torch.tensor([REDSHIFT_TOKEN_OFFSET + 4095])
+        assert is_redshift_token(tok, vocab_size=V).all()
+        # Legacy default would (correctly) reject the same token id.
+        assert not is_redshift_token(tok).any()

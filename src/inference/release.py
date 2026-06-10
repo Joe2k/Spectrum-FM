@@ -139,6 +139,9 @@ def _infer_transformer_dims(sd: dict) -> dict:
     d_model = int(sd["token_embedding.weight"].shape[1])
     return {
         "d_model": d_model,
+        # Vocab follows the redshift sub-vocab width (1288 for 256 z bins,
+        # 5128 for 4096); always take it from the checkpoint itself.
+        "vocab_size": int(sd["token_embedding.weight"].shape[0]),
         "n_encoder_layers": len(enc_idx),
         "n_decoder_layers": len(dec_idx),
         "n_heads": d_model // 64,
@@ -183,6 +186,7 @@ def load_release_models(
 
     dims = _infer_transformer_dims(sd)
     model = SpectrumTransformer(
+        vocab_size=dims["vocab_size"],
         d_model=cfg.get("d_model", dims["d_model"]),
         n_encoder_layers=cfg.get("n_encoder_layers", dims["n_encoder_layers"]),
         n_decoder_layers=cfg.get("n_decoder_layers", dims["n_decoder_layers"]),

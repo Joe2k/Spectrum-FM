@@ -223,3 +223,40 @@ class TestRedshiftTokenizer:
         edges = tok.get_bin_edges()
         assert len(edges) == tok.n_levels + 1
         assert edges[0] <= edges[-1]  # Monotonic
+
+
+class TestHighResolutionBins:
+    """4096-bin mode: ~0.001-level z precision for spectroscopic redshifts."""
+
+    def test_4096_round_trip_precision(self):
+        """With a dense fit sample, 4096 CDF bins recover z to ~1e-3."""
+        tok = RedshiftTokenizer(n_levels=4096)
+        # Dense, realistic galaxy z range; >> n_levels samples so quantile
+        # edges are well determined.
+        z = torch.linspace(0.0, 1.6, 100_000)
+        tok.fit(z)
+
+        probe = torch.linspace(0.01, 1.59, 500)
+        z_recon = tok.decode(tok.encode(probe))
+        max_err = (probe - z_recon).abs().max().item()
+        assert max_err < 1.5e-3, f"max |dz|={max_err:.5f} exceeds ~0.001 target"
+
+    def test_4096_beats_256_resolution(self):
+        """4096 bins must reconstruct strictly better than 256 on same data."""
+        z = torch.linspace(0.0, 1.6, 100_000)
+        probe = torch.linspace(0.01, 1.59, 500)
+        errs = {}
+        for n in (256, 4096):
+            tok = RedshiftTokenizer(n_levels=n)
+            tok.fit(z)
+            z_recon = tok.decode(tok.encode(probe))
+            errs[n] = (probe - z_recon).abs().median().item()
+        assert errs[4096] < errs[256] / 4
+
+    def test_4096_bin_edges_monotonic(self):
+        tok = RedshiftTokenizer(n_levels=4096)
+        z = torch.cat([torch.zeros(1000), torch.linspace(0.0, 3.5, 50_000)])
+        tok.fit(z)
+        edges = tok.get_bin_edges()
+        assert len(edges) == 4097
+        assert (edges[1:] >= edges[:-1]).all()

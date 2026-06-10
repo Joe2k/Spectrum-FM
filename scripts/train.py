@@ -26,7 +26,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from src.models.transformer import SpectrumTransformer
+from src.models.transformer import SpectrumTransformer, vocab_size_for_z_bins
 from src.tokenizers.spectrum import SpectrumTokenizer
 from src.tokenizers.redshift import RedshiftTokenizer
 from src.datasets.tokenized_dataset import TokenizedSpectrumDataset, collate_tokenized_batch
@@ -85,6 +85,10 @@ def parse_args():
                         help='Quick 3-epoch test on small data')
 
     # Pretrained tokenizer
+    parser.add_argument('--z_bins', type=int, default=256,
+                        help='Redshift quantization bins (CDF-equalized). '
+                             '4096 gives ~0.001-level bin width; vocab '
+                             'becomes 1032 + z_bins.')
     parser.add_argument('--tokenizer_ckpt', type=str, default=None,
                         help='Path to pretrained SpectrumTokenizer .pt; loads weights before tokenizing')
 
@@ -264,7 +268,7 @@ def main():
     
     # Fit redshift tokenizer
     all_z = [s['z'] for s in all_spectra]
-    redshift_tokenizer = RedshiftTokenizer(n_levels=256)
+    redshift_tokenizer = RedshiftTokenizer(n_levels=args.z_bins)
     redshift_tokenizer.fit(all_z)
     print(f"Redshift tokenizer fitted on {len(all_z)} samples")
     print(f"  Range: [{redshift_tokenizer._min_z:.4f}, {redshift_tokenizer._max_z:.4f}]")
@@ -307,6 +311,7 @@ def main():
     # Model
     print(f"\nInitializing model...")
     model = SpectrumTransformer(
+        vocab_size=vocab_size_for_z_bins(args.z_bins),
         d_model=args.d_model,
         n_encoder_layers=args.n_encoder_layers,
         n_decoder_layers=args.n_decoder_layers,
