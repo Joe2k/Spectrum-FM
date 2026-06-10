@@ -53,6 +53,19 @@ def parse_args():
     # Data
     p.add_argument("--manifest", type=Path, required=True,
                    help="JSONL manifest from build_dr1_index.py")
+    p.add_argument("--resume", type=Path, default=None,
+                   help="Resume from a full-state checkpoint (best.pt, "
+                        "last.pt or final.pt): restores model, optimizer, "
+                        "scaler, step and best_val. last.pt is a rolling "
+                        "full-state checkpoint written every --save-every "
+                        "steps — the right one for stitching multiple "
+                        "interactive-QOS sessions. Reuse the SAME --run-name "
+                        "to keep the same run dir. step_*.pt are model-only "
+                        "and cannot restore optimizer state.")
+    p.add_argument("--wandb-run-id", type=str, default=None,
+                   help="Continue an existing W&B run by id (resume='allow'). "
+                        "Overrides the id saved in --resume's checkpoint. "
+                        "Leave unset to auto-continue the checkpoint's run.")
     p.add_argument("--max-spectra", type=int, default=None,
                    help="Cap dataset size (smoke test)")
     p.add_argument("--surveys", nargs="*", default=None,
@@ -107,7 +120,8 @@ def parse_args():
     p.add_argument("--wandb-project", type=str, default="redshifty")
     p.add_argument("--push-wandb-artifact", action="store_true", default=True,
                    help="Upload best.pt to wandb as an Artifact on each best "
-                        "update (and final). Disable with --no-push-wandb-artifact.")
+                        "update (best only; final is never pushed). "
+                        "Disable with --no-push-wandb-artifact.")
     p.add_argument("--no-push-wandb-artifact", action="store_false",
                    dest="push_wandb_artifact")
 
@@ -287,6 +301,30 @@ def main():
     )
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
 
+    # Optional resume: restore model/optim/scaler/step/best_val from a
+    # full-state checkpoint (best.pt / last.pt / final.pt). Every rank loads
+    # the same file so DDP replicas stay identical.
+    resume_step = 0
+    resume_best = float("inf")
+    resume_wandb_id = None
+    if args.resume is not None:
+        rckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        (model.module if is_distributed else model).load_state_dict(rckpt["model"])
+        if "optim" in rckpt:
+            optim.load_state_dict(rckpt["optim"])
+        if "scaler" in rckpt:
+            scaler.load_state_dict(rckpt["scaler"])
+        resume_step = int(rckpt.get("step", 0))
+        resume_best = float(rckpt.get("val_loss", float("inf")))
+        resume_wandb_id = rckpt.get("wandb_run_id")
+        if rank == 0:
+            print(f"[resume] {args.resume} -> step={resume_step} "
+                  f"best_val={resume_best:.4f} wandb_id={resume_wandb_id}")
+
+    # Continue the same W&B run on resume: explicit --wandb-run-id wins,
+    # else the id saved in the checkpoint.
+    wandb_run_id = args.wandb_run_id or resume_wandb_id
+
     # Wandb init — rank 0 only
     wandb_run = None
     if rank == 0:
@@ -303,12 +341,17 @@ def main():
             run_name=args.run_name,
             config=wandb_config,
             out_dir=wandb_dir,
+            run_id=wandb_run_id,
+            resume="allow" if wandb_run_id else None,
         )
 
+    # W&B run id persisted in checkpoints so later resumes continue this run.
+    wandb_id_to_save = wandb_run.id if wandb_run is not None else wandb_run_id
+
     # Train
-    step = 0
+    step = resume_step
     epoch = 0
-    best_val = float("inf")
+    best_val = resume_best
     t_start = time.time()
     if train_sampler is not None:
         train_sampler.set_epoch(epoch)
@@ -351,7 +394,9 @@ def main():
 
         if rank == 0 and step % args.log_every == 0:
             dt = time.time() - t_start
-            rate = (step + 1) / max(dt, 1e-6)
+            # Steps completed by THIS process (a resume at a high absolute
+            # step must not inflate the rate).
+            rate = (step - resume_step + 1) / max(dt, 1e-6)
             n_codes = (model.module if is_distributed else model).codebook_size
             batch_codebook_use = indices.unique().numel() / n_codes
             msg = {
@@ -402,7 +447,9 @@ def main():
                     "val_loss": best_val,
                     "val_flux_r2": val_losses.get("flux_r2"),
                     "val_codebook_use": val_losses.get("codebook_use"),
-                    "args": vars(args) | {"manifest": str(args.manifest)},
+                    "wandb_run_id": wandb_id_to_save,
+                    "args": {k: str(v) if isinstance(v, Path) else v
+                             for k, v in vars(args).items()},
                 }
                 p = run_dir / "best.pt"
                 torch.save(ckpt, p)
@@ -433,12 +480,19 @@ def main():
                     )
 
         if rank == 0 and step > 0 and step % args.save_every == 0:
-            p = run_dir / f"step_{step:08d}.pt"
+            # Rolling full-state checkpoint: resume point for stitching
+            # multiple interactive-QOS sessions (best.pt may lag far behind
+            # late in training). Overwritten each time — no space blowup.
+            p = run_dir / "last.pt"
             torch.save({
                 "step": step,
                 "model": model.module.state_dict() if is_distributed else model.state_dict(),
+                "optim": optim.state_dict(),
+                "scaler": scaler.state_dict(),
+                "val_loss": best_val,
+                "wandb_run_id": wandb_id_to_save,
             }, p)
-            print(f"  ckpt -> {p}")
+            print(f"  ckpt -> {p} (rolling, full state, step {step})")
 
         step += 1
 
@@ -447,6 +501,10 @@ def main():
         torch.save({
             "step": step,
             "model": model.module.state_dict() if is_distributed else model.state_dict(),
+            "optim": optim.state_dict(),
+            "scaler": scaler.state_dict(),
+            "val_loss": best_val,
+            "wandb_run_id": wandb_id_to_save,
         }, p)
         print(f"[done] final -> {p}")
         if args.cfs_out is not None:
@@ -459,13 +517,10 @@ def main():
                       f"SCRATCH final.pt is safe at {p}")
         print(f"[done] best val_loss={best_val:.4f}")
 
-        if args.push_wandb_artifact and wandb_run is not None:
-            log_model_artifact(
-                wandb_run, p,
-                name=f"tokenizer_{args.run_name}",
-                aliases=["final", f"step_{step}"],
-                metadata={"step": step},
-            )
+        # NOTE: no final.pt artifact push — only the best checkpoint goes to
+        # W&B. log_model_artifact prunes prior versions of the artifact, so
+        # a final push would DELETE the best version and leave the (worse)
+        # last model as the only artifact.
 
         wfinish(wandb_run)
 

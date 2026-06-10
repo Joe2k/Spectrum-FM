@@ -146,8 +146,9 @@ def parse_args():
                         "Overrides the id saved in --resume's checkpoint. "
                         "Leave unset to auto-continue the checkpoint's run.")
     p.add_argument("--push-wandb-artifact", action="store_true", default=True,
-                   help="Upload a slim model-only best.pt to wandb as an Artifact "
-                        "on each best update (and final). Disable with --no-push-wandb-artifact.")
+                   help="Upload best.pt to wandb as an Artifact on each best "
+                        "update (best only; final is never pushed). "
+                        "Disable with --no-push-wandb-artifact.")
     p.add_argument("--no-push-wandb-artifact", action="store_false",
                    dest="push_wandb_artifact")
     p.add_argument("--scratch-out", type=Path,
@@ -574,13 +575,10 @@ def main():
                 print(f"  WARN: cfs_out final mirror failed ({e}); "
                       f"SCRATCH final.pt is safe at {p}")
 
-        if args.push_wandb_artifact and wandb_run is not None:
-            log_model_artifact(
-                wandb_run, p,
-                name=f"approach_{args.approach}_{args.run_name}",
-                aliases=["final", f"step_{step}"],
-                metadata={"step": step, "approach": args.approach},
-            )
+        # NOTE: no final.pt artifact push — only the best checkpoint goes to
+        # W&B. log_model_artifact prunes prior versions of the artifact, so
+        # a final push would DELETE the best version (the one MANIFEST.json
+        # and the release pipeline reference as :best).
 
         ar_final = evaluate_ar(
             model.module if is_distributed else model,

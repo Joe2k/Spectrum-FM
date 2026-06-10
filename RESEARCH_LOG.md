@@ -1521,3 +1521,41 @@ gradient-flow check. Suite: 153 passed.
 Next: rerun the same 2k trial (`tokenizer_v2_trial_jointent`) and
 compare train/codebook_use at equal steps vs `f9s2dy8k`; launch the
 24h run with whichever wins (expect joint).
+
+## 2026-06-10: Tokenizer trainer — resumable (interactive-QOS workflow) + best-only artifacts
+
+### Resume (`pretrain_tokenizer.py --resume`)
+
+Same pattern as the transformer trainer: restore model/optim/scaler/
+step/best_val from a full-state checkpoint on every rank; W&B run id is
+saved into checkpoints and read back on resume (`--wandb-run-id`
+overrides) so metrics continue on one chart; `steps_per_sec` counts
+steps since this process started (transformer's resume-rate fix,
+applied preemptively). New **rolling `last.pt`** written every
+`--save-every` steps with full state (replaces the accumulating
+model-only `step_*.pt`, which couldn't restore the optimizer anyway) —
+this is the resume point for stitching multiple 4h interactive-QOS
+sessions, since `best.pt` can lag far behind late in training.
+`final.pt` is now full-state too. Workflow:
+
+    # session 1
+    srun ... pretrain_tokenizer.py --run-name tokenizer_v2_3k --steps 100000 ...
+    # session 2+ (same run dir, same W&B chart, exact optimizer state)
+    srun ... pretrain_tokenizer.py --run-name tokenizer_v2_3k --steps 100000 \
+        --resume $SCRATCH/deepsrch/checkpoints/tokenizer_v2_3k/last.pt ...
+
+### Best-only W&B artifacts (both trainers)
+
+Found a latent footgun while wiring this: `log_model_artifact` prunes
+all prior versions of an artifact after upload (`keep_only_latest`),
+so the end-of-run `final.pt` push **deleted the best version** —
+including its `best` alias, which MANIFEST.json and the release
+pipeline reference. Any run that reached its step cap would silently
+replace the best checkpoint artifact with the (worse) last model.
+Removed the final-push from BOTH `pretrain_tokenizer.py` and
+`train_transformer.py` — only best-checkpoint improvements upload, so
+the surviving artifact version is always the best. (`final.pt` still
+written to SCRATCH + mirrored to CFS.) This mattered immediately: the
+v9 transformer run is heading for its 150k cap and would have clobbered
+the released `:best` artifact on completion. README artifact section
+updated. Tests: 153 passed.

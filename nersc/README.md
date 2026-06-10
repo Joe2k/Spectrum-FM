@@ -264,10 +264,12 @@ leakage (fibers in the same exposure share sky background, conditions).
 
 ## Wandb model artifacts (auto-uploaded)
 
-By default, `train_transformer.py` uploads a slim model-only copy of
-`best.pt` (with redshift-tokenizer state baked in, no optimizer/scaler)
-to wandb on each best-checkpoint update and at end of run. Stored as a
-versioned `wandb.Artifact`, viewable in the project's Artifacts tab.
+By default, both trainers upload `best.pt` to wandb on each
+best-checkpoint update — **best only; `final.pt` is never pushed**.
+(`log_model_artifact` prunes prior versions of the artifact, so a
+final-model push would delete the best version — the one MANIFEST.json
+references as `:best`.) Stored as a versioned `wandb.Artifact`,
+viewable in the project's Artifacts tab.
 
 Notebook usage (no `scp` required):
 
