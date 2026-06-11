@@ -448,15 +448,21 @@ def main():
             batch_codebook_use = indices.unique().numel() / n_codes
 
             # Circuit breaker (rank 0 raises; srun terminates all ranks).
-            use_ema = (batch_codebook_use if use_ema is None
-                       else 0.9 * use_ema + 0.1 * batch_codebook_use)
-            use_peak = max(use_peak, use_ema)
-            if use_peak > 0.10 and use_ema < 0.25 * use_peak:
-                raise RuntimeError(
-                    f"CODEBOOK COLLAPSE at step {step}: utilization EMA "
-                    f"{use_ema:.3f} fell below 25% of peak {use_peak:.3f}. "
-                    f"Aborting before the model degrades further. Resume "
-                    f"from best.pt (NOT last.pt) — consider lowering --lr.")
+            # Armed only after step 500: a random-init encoder scatters
+            # codes (~0.22 at step 0) and every healthy run contracts to
+            # ~0.01 within ~100 steps before regrowing — counting the init
+            # scatter as "peak" made the normal contraction look like a
+            # collapse (false abort at step 340, run 856wnc99).
+            if step >= 500:
+                use_ema = (batch_codebook_use if use_ema is None
+                           else 0.9 * use_ema + 0.1 * batch_codebook_use)
+                use_peak = max(use_peak, use_ema)
+                if use_peak > 0.10 and use_ema < 0.25 * use_peak:
+                    raise RuntimeError(
+                        f"CODEBOOK COLLAPSE at step {step}: utilization EMA "
+                        f"{use_ema:.3f} fell below 25% of peak {use_peak:.3f}. "
+                        f"Aborting before the model degrades further. Resume "
+                        f"from best.pt (NOT last.pt) — consider lowering --lr.")
             msg = {
                 "kind": "train",
                 "step": step,
@@ -478,7 +484,8 @@ def main():
             wlog(wandb_run, {
                 **{f"train/loss_{k}": float(v.item()) for k, v in loss.items()},
                 "train/codebook_use": batch_codebook_use,
-                "train/codebook_use_ema": use_ema,
+                "train/codebook_use_ema": (use_ema if use_ema is not None
+                                           else batch_codebook_use),
                 "train/lr": msg["lr"],
                 "train/steps_per_sec": rate,
             }, step=step)

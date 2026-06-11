@@ -1699,3 +1699,17 @@ Defense matrix now: joint entropy (collapse prevention) + 0.75·lnK cap
 bf16 (fp16 overflow class) + non-finite-grad skip (DDP-safe) + circuit
 breaker & checkpoint gate (damage control). Fresh run:
 `tokenizer_v2_3k_v3`. Tests: 158 passed.
+
+## 2026-06-11 (cont.): circuit breaker false positive at step 340 — armed after step 500
+
+v3 launch (run `856wnc99`) was killed by the new breaker at step 340.
+Root cause of the false positive: a random-init encoder scatters codes
+(utilization ~0.22 at step 0) and every healthy run then naturally
+contracts to ~0.01 within ~100 steps before regrowing (same 0.22 → 0.01
+pattern in f9s2dy8k, 5isstibi, hp8gj40n). The breaker counted the init
+scatter as "peak", so the normal contraction tripped the 25% rule. Fix:
+EMA/peak tracking and the abort check are armed only from step ≥ 500 —
+past the init transient, before any real collapse window (earliest
+observed onset: ~5.2k). Silver lining: the abort path is proven — rank 0
+raised and srun terminated all ranks cleanly within seconds. Relaunch
+the same v3 command (fresh W&B run; 340 lost steps are immaterial).
