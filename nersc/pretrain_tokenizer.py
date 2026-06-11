@@ -149,6 +149,8 @@ def evaluate(model, loader, device, amp: bool, max_batches: int = 50,
     model.eval()
     losses: dict = {}
     r2_sum = 0.0
+    r2_hi_sum = 0.0
+    n_hi = 0
     codes_seen = torch.zeros(model.codebook_size, dtype=torch.bool, device=device)
     n = 0
     with torch.no_grad():
@@ -167,16 +169,26 @@ def evaluate(model, loader, device, amp: bool, max_batches: int = 50,
                 recon, loss, indices = model(x, wavelength=wave)
             for k, v in loss.items():
                 losses[k] = losses.get(k, 0.0) + v.item()
-            # R^2 on the model grid (ivar > 0 pixels only)
+            # R^2 on the model grid (ivar > 0 pixels only). Plain flux_r2 is
+            # capped well below 1 for faint spectra (it compares against the
+            # NOISY input), so also track the median-SNR > 3 subset — the
+            # AION-comparable number.
             x_grid = model._to_grid(x, wave)
-            r2_sum += flux_r2(x_grid[:, 0], recon[:, 0].float(),
-                              ivar=x_grid[:, 1].square()).item()
+            r2_per = flux_r2(x_grid[:, 0], recon[:, 0].float(),
+                             ivar=x_grid[:, 1].square(), reduce=False)
+            r2_sum += r2_per.mean().item()
+            snr = (x_grid[:, 0] * x_grid[:, 1]).median(dim=-1).values  # (B,)
+            hi = snr > 3.0
+            if hi.any():
+                r2_hi_sum += r2_per[hi].mean().item()
+                n_hi += 1
             codes_seen[indices.unique()] = True
             n += 1
     if n == 0:
         return {k: float("nan") for k in ("total", "recon", "quant", "flux_r2", "codebook_use")}
     out = {k: v / n for k, v in losses.items()}
     out["flux_r2"] = r2_sum / n
+    out["flux_r2_snr3"] = (r2_hi_sum / n_hi) if n_hi else float("nan")
     out["codebook_use"] = codes_seen.float().mean().item()
     return out
 

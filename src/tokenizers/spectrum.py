@@ -617,7 +617,7 @@ class SpectrumTokenizer(nn.Module):
 
 
 def flux_r2(flux_true: torch.Tensor, flux_recon: torch.Tensor,
-            ivar: torch.Tensor = None) -> torch.Tensor:
+            ivar: torch.Tensor = None, reduce: bool = True) -> torch.Tensor:
     """Mean per-spectrum R^2 of the flux reconstruction.
 
     The tokenizer-quality gating metric (AION's spectrum tokenizer
@@ -629,9 +629,16 @@ def flux_r2(flux_true: torch.Tensor, flux_recon: torch.Tensor,
         flux_recon: (B, L) reconstructed flux
         ivar: (B, L) optional inverse variance; pixels with ivar == 0
             (padding / fully masked) are excluded
+        reduce: if True (default) return the batch mean; if False return
+            the per-spectrum (B,) R^2 values.
+
+    Caveat: R^2 is computed against the NOISY input flux, so for low-SNR
+    spectra even a perfect denoised reconstruction caps out near
+    signal_var / (signal_var + noise_var). Slice by SNR (or use the
+    ivar-weighted NLL) when judging tokenizer quality on faint targets.
 
     Returns:
-        scalar tensor, mean R^2 over the batch
+        scalar tensor (reduce=True) or (B,) tensor (reduce=False)
     """
     flux_true = flux_true.float()
     flux_recon = flux_recon.float()
@@ -643,7 +650,8 @@ def flux_r2(flux_true: torch.Tensor, flux_recon: torch.Tensor,
     mean = (flux_true * valid).sum(dim=-1, keepdim=True) / n.unsqueeze(-1)
     ss_res = ((flux_true - flux_recon).square() * valid).sum(dim=-1)
     ss_tot = ((flux_true - mean).square() * valid).sum(dim=-1).clamp(min=1e-12)
-    return (1.0 - ss_res / ss_tot).mean()
+    r2 = 1.0 - ss_res / ss_tot
+    return r2.mean() if reduce else r2
 
 
 def test_tokenizer_shapes():

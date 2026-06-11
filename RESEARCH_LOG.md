@@ -1597,3 +1597,24 @@ resuming into): same command, run name `tokenizer_v2_3k_ddp2`,
 `val/codebook_use` (expect slower but steady climb; healthy target is
 high-but-not-pinned-1.0) and `val/flux_r2` (must keep rising past 0.29).
 Tests: capped-quant arithmetic, zero-gradient-above-target. 155 passed.
+
+## 2026-06-10: tokenizer_v2_3k_ddp2 — stable; killed by 4h wallclock; SNR-sliced R²
+
+Run `hp8gj40n` (lr 3e-4, entropy_weight 0.02 + 0.9·lnK cap) reached step
+29,560 in 238 min before the interactive-QOS 4h limit killed it (W&B
+state "crashed" = heartbeat stop, not a training failure). **The
+stability fix held**: no reconstruction cliff, codebook_use climbing
+gently (val 0.47 → 0.62, not pinned at 1.0), best val nll_flux 0.60 at
+24k — per-pixel χ² ≈ 1.2, near the noise floor. Resume from
+`last.pt` (step 28k) continues the same W&B chart.
+
+`val/flux_r2` plateauing at ~0.26–0.29 is largely a METRIC artifact, not
+a model ceiling: R² compares the reconstruction against the *noisy*
+input flux, and the balanced manifest is dark-program-heavy (faint,
+low SNR). A perfect denoised reconstruction of a low-SNR spectrum caps
+at signal_var/(signal_var+noise_var) ≪ 1. Added
+`val/flux_r2_snr3` — per-spectrum R² restricted to spectra with median
+per-pixel SNR > 3 — as the AION-comparable number (their 0.994 is only
+meaningful on bright spectra). `flux_r2` gains `reduce=False` for
+per-spectrum values; caveat documented in the docstring. The
+ivar-weighted NLL remains the honest objective on faint targets.
