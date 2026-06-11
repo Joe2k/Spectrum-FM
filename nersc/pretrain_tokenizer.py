@@ -380,6 +380,14 @@ def main():
     step = resume_step
     epoch = 0
     best_val = resume_best
+    # Collapse circuit breaker state: EMA of per-batch codebook utilization
+    # and its running peak. If the EMA falls to <25% of a peak that had
+    # already cleared 0.10, the codebook is collapsing (ddp2 signature:
+    # 0.27 -> 0.015 within ~3k steps) — abort within minutes instead of
+    # training garbage for hours. Resets on resume (grace period until the
+    # EMA rebuilds past 0.10).
+    use_ema = None
+    use_peak = 0.0
     t_start = time.time()
     if train_sampler is not None:
         train_sampler.set_epoch(epoch)
@@ -438,6 +446,17 @@ def main():
             rate = (step - resume_step + 1) / max(dt, 1e-6)
             n_codes = (model.module if is_distributed else model).codebook_size
             batch_codebook_use = indices.unique().numel() / n_codes
+
+            # Circuit breaker (rank 0 raises; srun terminates all ranks).
+            use_ema = (batch_codebook_use if use_ema is None
+                       else 0.9 * use_ema + 0.1 * batch_codebook_use)
+            use_peak = max(use_peak, use_ema)
+            if use_peak > 0.10 and use_ema < 0.25 * use_peak:
+                raise RuntimeError(
+                    f"CODEBOOK COLLAPSE at step {step}: utilization EMA "
+                    f"{use_ema:.3f} fell below 25% of peak {use_peak:.3f}. "
+                    f"Aborting before the model degrades further. Resume "
+                    f"from best.pt (NOT last.pt) — consider lowering --lr.")
             msg = {
                 "kind": "train",
                 "step": step,
@@ -459,6 +478,7 @@ def main():
             wlog(wandb_run, {
                 **{f"train/loss_{k}": float(v.item()) for k, v in loss.items()},
                 "train/codebook_use": batch_codebook_use,
+                "train/codebook_use_ema": use_ema,
                 "train/lr": msg["lr"],
                 "train/steps_per_sec": rate,
             }, step=step)
@@ -523,16 +543,23 @@ def main():
             # Rolling full-state checkpoint: resume point for stitching
             # multiple interactive-QOS sessions (best.pt may lag far behind
             # late in training). Overwritten each time — no space blowup.
-            p = run_dir / "last.pt"
-            torch.save({
-                "step": step,
-                "model": model.module.state_dict() if is_distributed else model.state_dict(),
-                "optim": optim.state_dict(),
-                "scaler": scaler.state_dict(),
-                "val_loss": best_val,
-                "wandb_run_id": wandb_id_to_save,
-            }, p)
-            print(f"  ckpt -> {p} (rolling, full state, step {step})")
+            # Health gate: never overwrite last.pt with a degrading state
+            # (ddp2's collapsed 58k state replaced a healthy 28k one).
+            unhealthy = use_peak > 0.10 and (use_ema or 0.0) < 0.5 * use_peak
+            if unhealthy:
+                print(f"  last.pt SKIPPED at step {step}: codebook EMA "
+                      f"{use_ema:.3f} < 50% of peak {use_peak:.3f} (unhealthy)")
+            else:
+                p = run_dir / "last.pt"
+                torch.save({
+                    "step": step,
+                    "model": model.module.state_dict() if is_distributed else model.state_dict(),
+                    "optim": optim.state_dict(),
+                    "scaler": scaler.state_dict(),
+                    "val_loss": best_val,
+                    "wandb_run_id": wandb_id_to_save,
+                }, p)
+                print(f"  ckpt -> {p} (rolling, full state, step {step})")
 
         step += 1
 

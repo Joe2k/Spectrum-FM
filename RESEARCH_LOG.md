@@ -1675,3 +1675,27 @@ Two mechanisms:
 Resume from **best.pt** (pre-collapse weights; `last.pt` now holds the
 collapsed 58k state — do NOT resume from it). Same run name continues
 the W&B chart. Tests: huber math, forward outlier-boundedness. 158 passed.
+
+## 2026-06-11 (cont.): collapse circuit breaker + healthy-only last.pt
+
+Two run-protection guards in `pretrain_tokenizer.py` ahead of the fresh
+v3 start (cannot *prevent* every pathology, but converts the worst case
+from "25k wasted steps + poisoned resume point" to "abort within
+minutes, healthy checkpoint preserved"):
+
+1. **Circuit breaker**: EMA (0.9) of per-batch codebook utilization,
+   tracked at every log step with its running peak. If the EMA falls
+   below 25% of a peak that had already cleared 0.10, raise immediately
+   (rank 0 raises; srun terminates the step). ddp2's collapse
+   (0.27 → 0.015 over ~3k steps) would have tripped this within ~1k
+   steps of onset. Grace period at start/resume until the EMA rebuilds
+   past 0.10. `train/codebook_use_ema` logged to W&B.
+2. **Healthy-only `last.pt`**: the rolling checkpoint is skipped (with a
+   loud message) whenever the EMA is below 50% of peak — ddp2's
+   collapsed step-58k state can no longer overwrite a healthy one.
+
+Defense matrix now: joint entropy (collapse prevention) + 0.75·lnK cap
+& weight 0.02 (over-diversification) + Huber 10σ NLL (spike batches) +
+bf16 (fp16 overflow class) + non-finite-grad skip (DDP-safe) + circuit
+breaker & checkpoint gate (damage control). Fresh run:
+`tokenizer_v2_3k_v3`. Tests: 158 passed.
