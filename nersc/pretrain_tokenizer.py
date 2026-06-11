@@ -90,6 +90,13 @@ def parse_args():
                         "needs to beat collapse. 0.1 (uncapped) destabilized "
                         "reconstruction in tokenizer_v2_3k_ddp; 0.02 is the "
                         "new default. 0 disables (v1 behavior).")
+    p.add_argument("--entropy-target-frac", type=float, default=0.75,
+                   help="The codebook-diversity reward saturates at this "
+                        "fraction of ln(codebook_size); above it the "
+                        "uniformity gradient is zero. ddp2 showed recon "
+                        "starts paying for codebook growth past ~0.72 of "
+                        "max entropy (~500 codes), so 0.75 stops the "
+                        "pressure there. Collapse territory is ~0.4.")
     p.add_argument("--legacy-stretch", action="store_true",
                    help="Use the v1 length-stretch interpolation instead of "
                         "wavelength-aware resampling onto the fixed "
@@ -302,6 +309,7 @@ def main():
     model = SpectrumTokenizer(
         recon_loss=args.recon_loss,
         entropy_weight=args.entropy_weight,
+        entropy_target_frac=args.entropy_target_frac,
     ).to(device)
     if is_distributed:
         model = DDP(model, device_ids=[device.index], find_unused_parameters=False)
@@ -487,6 +495,7 @@ def main():
                             "val_codebook_use": val_losses.get("codebook_use"),
                             "recon_loss": args.recon_loss,
                             "entropy_weight": args.entropy_weight,
+                            "entropy_target_frac": args.entropy_target_frac,
                             "wavelength_aware": not args.legacy_stretch,
                             "step": step,
                             "full_state": True,

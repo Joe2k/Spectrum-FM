@@ -153,7 +153,7 @@ class LookUpFreeQuantizer(nn.Module):
 
     def __init__(self, dim=10, codebook_size=1024, commitment_weight=0.25,
                  entropy_weight=0.02, entropy_temperature=1.0,
-                 entropy_target_frac=0.9):
+                 entropy_target_frac=0.75):
         super().__init__()
         self.dim = dim
         self.codebook_size = codebook_size
@@ -294,6 +294,7 @@ class SpectrumTokenizer(nn.Module):
         commitment_weight=0.25,
         recon_loss="nll",
         entropy_weight=0.02,
+        entropy_target_frac=0.75,
         istd_loss_weight=0.1,
     ):
         super().__init__()
@@ -334,6 +335,7 @@ class SpectrumTokenizer(nn.Module):
             codebook_size=codebook_size,
             commitment_weight=commitment_weight,
             entropy_weight=entropy_weight,
+            entropy_target_frac=entropy_target_frac,
         )
         
         # Post-quantization projection

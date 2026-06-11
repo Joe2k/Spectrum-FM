@@ -1618,3 +1618,21 @@ per-pixel SNR > 3 — as the AION-comparable number (their 0.994 is only
 meaningful on bright spectra). `flux_r2` gains `reduce=False` for
 per-spectrum values; caveat documented in the docstring. The
 ivar-weighted NLL remains the honest objective on faint targets.
+
+## 2026-06-10 (cont.): ddp2 val NLL drift after ~24k → entropy target lowered to 0.75
+
+Confirmed (project owner spotted it): ddp2's val nll_flux bottomed at
+0.60 near step 24k and drifted to 0.78–1.0 by 29.5k while codebook_use
+climbed 0.47 → 0.62. Same mechanism as the crash, in miniature and
+bounded: `entropy_codebook` was 5.07 — still below the 0.9·lnK = 6.24
+saturation target — so the uniformity gradient was still active and
+recon kept paying for codebook expansion. The data says recon starts
+losing past ~0.72 of max entropy (~500 codes alive).
+
+Change: `entropy_target_frac` default 0.9 → **0.75** (target 5.19 ≈
+exactly where ddp2 sits, so the pressure shuts off on resume), exposed
+end-to-end: `LookUpFreeQuantizer` / `SpectrumTokenizer` /
+`--entropy-target-frac` / artifact metadata. Collapse territory is
+~0.4, so 0.75 keeps a wide safety margin. Resume ddp2 from `last.pt`
+(step 28k) on the new code; expect nll to turn back down as the
+codebook stops churning.
