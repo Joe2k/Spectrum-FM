@@ -113,6 +113,10 @@ def parse_args():
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--amp", action="store_true",
                    help="Enable mixed precision (recommended on A100)")
+    p.add_argument("--amp-dtype", choices=["bf16", "fp16"], default="bf16",
+                   help="Autocast dtype. bf16 (default, A100+) needs no "
+                        "GradScaler and removes the fp16 overflow class; "
+                        "fp16 reproduces the pre-2026-06-11 behavior.")
 
     # Logging / checkpointing
     p.add_argument("--run-name", type=str, default="tokenizer_v1")
@@ -321,7 +325,9 @@ def main():
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
-    scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
+    amp_dtype = torch.bfloat16 if args.amp_dtype == "bf16" else torch.float16
+    # GradScaler is only needed for fp16; bf16 has fp32 dynamic range.
+    scaler = torch.amp.GradScaler("cuda", enabled=args.amp and args.amp_dtype == "fp16")
 
     # Optional resume: restore model/optim/scaler/step/best_val from a
     # full-state checkpoint (best.pt / last.pt / final.pt). Every rank loads
@@ -334,7 +340,7 @@ def main():
         (model.module if is_distributed else model).load_state_dict(rckpt["model"])
         if "optim" in rckpt:
             optim.load_state_dict(rckpt["optim"])
-        if "scaler" in rckpt:
+        if "scaler" in rckpt and scaler.is_enabled():
             scaler.load_state_dict(rckpt["scaler"])
         resume_step = int(rckpt.get("step", 0))
         resume_best = float(rckpt.get("val_loss", float("inf")))
@@ -404,13 +410,24 @@ def main():
                 if not args.legacy_stretch and "wavelength" in batch else None)
 
         optim.zero_grad(set_to_none=True)
-        with torch.amp.autocast("cuda", enabled=args.amp):
+        with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=args.amp):
             _, loss, indices = model(x, wavelength=wave)
 
         scaler.scale(loss["total"]).backward()
-        if args.grad_clip > 0:
-            scaler.unscale_(optim)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+        scaler.unscale_(optim)
+        # clip_grad_norm_ runs AFTER the DDP grad allreduce, so total_norm is
+        # identical on every rank — a skip decision based on it cannot
+        # desynchronize the replicas. Non-finite grads (the spike-batch
+        # failure that collapsed ddp2's codebook) drop the step entirely.
+        total_norm = torch.nn.utils.clip_grad_norm_(
+            model.parameters(), args.grad_clip if args.grad_clip > 0 else float("inf"))
+        if not torch.isfinite(total_norm):
+            optim.zero_grad(set_to_none=True)
+            if rank == 0:
+                print(f"[step {step:6d}] WARN: non-finite grad norm — step skipped")
+            scaler.update()
+            step += 1
+            continue
         scaler.step(optim)
         scaler.update()
 

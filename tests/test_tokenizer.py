@@ -450,3 +450,41 @@ class TestEntropyTargetCap:
         (l["commit"] + 1.0 * l["entropy_sample"]).backward()
         g_ref = z.grad.clone()
         assert torch.allclose(g_quant, g_ref, atol=1e-6)
+
+
+class TestHuberNLL:
+    """Robust NLL: quadratic to delta sigma, linear beyond — spike batches
+    (the ddp2 collapse trigger) can no longer dominate the gradient."""
+
+    def test_quadratic_within_delta(self):
+        from src.tokenizers.spectrum import huber_chi2
+        chi = torch.tensor([0.0, 1.0, -5.0, 9.9])
+        expected = 0.5 * chi.square()
+        assert torch.allclose(huber_chi2(chi, delta=10.0), expected)
+
+    def test_linear_beyond_delta(self):
+        from src.tokenizers.spectrum import huber_chi2
+        # At chi=100 with delta=10: 10*100 - 50 = 950, vs quadratic 5000.
+        chi = torch.tensor([100.0])
+        assert huber_chi2(chi, delta=10.0).item() == pytest.approx(950.0)
+        # Doubling an extreme residual doubles (not quadruples) the loss.
+        l1 = huber_chi2(torch.tensor([50.0]), delta=10.0).item()
+        l2 = huber_chi2(torch.tensor([100.0]), delta=10.0).item()
+        assert l2 / l1 < 2.2
+
+    def test_forward_uses_huber(self):
+        """An extreme-ivar outlier pixel contributes boundedly to the NLL."""
+        torch.manual_seed(0)
+        model = SpectrumTokenizer(istd_loss_weight=0.0)
+        model.eval()
+        flux = torch.randn(1, 7781)
+        istd = torch.full((1, 7781), 1.0)
+        x = torch.stack([flux, istd], dim=1)
+        x_spike = x.clone()
+        x_spike[0, 1, 4000] = 1000.0  # absurd ivar on one pixel
+        with torch.no_grad():
+            _, l_base, _ = model(x)
+            _, l_spike, _ = model(x_spike)
+        # Quadratic would add ~0.5*(1000*err)^2 / n ~ O(1e4); Huber keeps the
+        # spike's contribution within a couple of nats of the baseline.
+        assert l_spike["nll_flux"].item() < l_base["nll_flux"].item() + 5.0

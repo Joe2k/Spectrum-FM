@@ -1636,3 +1636,42 @@ end-to-end: `LookUpFreeQuantizer` / `SpectrumTokenizer` /
 ~0.4, so 0.75 keeps a wide safety margin. Resume ddp2 from `last.pt`
 (step 28k) on the new code; expect nll to turn back down as the
 codebook stops churning.
+
+## 2026-06-11: ddp2 resume collapsed to a single code — spike-robustness fixes
+
+### What happened (run `hp8gj40n`, resumed at 28k)
+
+Resume itself was healthy: nll 0.74 → 0.66 by 31k, codebook stable
+~0.24, entropy_codebook hovering at the new 0.75·lnK target — the cap
+worked. Then a **loss spike at ~33.5k** (train nll 6.9; later spikes 38
+and 61) destabilized training, and the codebook collapsed 0.27 → 0.001:
+ONE code by ~46k, val nll pinned at 10.8, R² negative, ~25k steps wasted.
+
+Two mechanisms:
+1. **NLL spike fragility**: per-pixel 0.5·ivar·err² is unbounded — one
+   pathological pixel (cosmic ray / underestimated noise, chi ~100σ)
+   contributes ~5000 nats and poisons the weights at lr ~2.7e-4.
+2. **Entropy can't rescue a confident collapse**: once |z| is large the
+   code softmax is one-hot and the entropy gradient vanishes — the
+   anti-collapse term is prevention-only. (This also retro-explains why
+   weight 0.02 couldn't pull it back.)
+
+### Fixes (all default-on)
+
+- **Huber NLL** (`huber_chi2`, delta = 10σ): quadratic ≤10σ, linear
+  beyond. A chi=100 pixel now contributes 950 instead of 5000, and
+  doubling an extreme residual doubles (not quadruples) the loss.
+  Identical to the Gaussian NLL for all well-modeled pixels.
+- **DDP-safe skip guard**: `clip_grad_norm_` runs after the DDP grad
+  allreduce, so its total_norm is identical on every rank — skipping
+  the optimizer step on a non-finite norm cannot desync replicas.
+- **bf16 default** (`--amp-dtype bf16`, fp16 retained as option):
+  fp32 dynamic range in autocast, GradScaler auto-disabled (and its
+  checkpoint state only loaded when enabled, so old fp16 checkpoints
+  resume cleanly into bf16).
+
+### Restart guidance
+
+Resume from **best.pt** (pre-collapse weights; `last.pt` now holds the
+collapsed 58k state — do NOT resume from it). Same run name continues
+the W&B chart. Tests: huber math, forward outlier-boundedness. 158 passed.

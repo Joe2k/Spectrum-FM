@@ -39,6 +39,21 @@ GRID_WAVE_STEP = 0.8
 GRID_WAVE_MAX = GRID_WAVE_MIN + GRID_WAVE_STEP * (LATENT_GRID_SIZE - 1)  # 10462.4
 
 
+def huber_chi2(chi: torch.Tensor, delta: float = 10.0) -> torch.Tensor:
+    """Per-pixel robust NLL term on the normalized residual chi = err/sigma.
+
+    0.5*chi^2 within |chi| <= delta, linear (delta*|chi| - delta^2/2)
+    beyond. A single pathological pixel (cosmic ray, underestimated
+    noise) at chi ~ 100 contributes ~1e3 instead of ~5e3 — run
+    tokenizer_v2_3k_ddp2 was destabilized at step ~33.5k by exactly such
+    spike batches, after which the codebook collapsed to one code.
+    """
+    abs_chi = chi.abs()
+    quad = 0.5 * chi.square()
+    lin = delta * abs_chi - 0.5 * delta * delta
+    return torch.where(abs_chi <= delta, quad, lin)
+
+
 class LayerNorm1d(nn.Module):
     """LayerNorm for 1D conv features (B, C, L)."""
     
@@ -296,6 +311,7 @@ class SpectrumTokenizer(nn.Module):
         entropy_weight=0.02,
         entropy_target_frac=0.75,
         istd_loss_weight=0.1,
+        nll_huber_delta=10.0,
     ):
         super().__init__()
 
@@ -306,6 +322,7 @@ class SpectrumTokenizer(nn.Module):
         self.embedding_dim = embedding_dim
         self.codebook_size = codebook_size
         self.recon_loss = recon_loss
+        self.nll_huber_delta = nll_huber_delta
         self.istd_loss_weight = istd_loss_weight
         
         # === ENCODER ===
@@ -599,7 +616,11 @@ class SpectrumTokenizer(nn.Module):
             flux_rec = recon[:, 0].float()
             valid = (ivar > 0).float()
             n_valid = valid.sum().clamp(min=1.0)
-            nll = (0.5 * ivar * (flux_true - flux_rec).square() * valid).sum() / n_valid
+            # Robust (Huber) chi^2: quadratic to 10 sigma, linear beyond —
+            # equals 0.5*ivar*err^2 for well-modeled pixels, but spike
+            # batches can no longer poison the weights.
+            chi = (flux_true - flux_rec) * istd_true
+            nll = (huber_chi2(chi, delta=self.nll_huber_delta) * valid).sum() / n_valid
             # Auxiliary istd-channel MSE in normalized space, so the
             # decoder's channel 1 stays meaningful for decode() callers.
             istd_mse = F.mse_loss(recon_norm[:, 1].float(), x_norm[:, 1].float())
