@@ -1775,7 +1775,8 @@ SpecPT (Park et al. 2025, ApJ 988:139, arXiv:2501.01070); OmniSpectra
   level SSL tokenizer on native grids across SDSS/DESI/GALAH/APOGEE —
   evidence the field is converging on survey-agnostic tokenization;
   our GRID_WAVE design is compatible but grid-locked. Native-resolution
-  variable-length tokenization is the v3-tokenizer-era question, not now.
+  variable-length tokenization is a future v3-GENERATION tokenizer
+  question (a new recipe, not a rerun of v2), not now.
 
 ### TOKENIZER — next steps (post-v3)
 
