@@ -1848,7 +1848,7 @@ X6. **Sub-bin redshift decoding**: decode ẑ as the softmax-weighted
 X7. **Embedding probe suite** (roadmap 7) — the "understanding" claim:
     frozen encoder + linear/MLP probes for z, spectype, PROVABGS galaxy
     properties, Zhang+24 stellar params; mean + attentive pooling;
-    報告 vs AION Table 1/3 Sp rows and OmniSpectra where overlapping.
+    report vs AION Table 1/3 Sp rows and OmniSpectra where overlapping.
 X8. **Uncertainty/calibration**: the 4096-way softmax is a discretized
     z-posterior for free — check calibration (PIT histograms), use
     entropy/multi-modality to flag catastrophic outliers. SpecPT-level
