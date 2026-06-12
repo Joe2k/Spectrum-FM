@@ -1721,8 +1721,8 @@ the AION comparison? Four-row scorecard:
 
 1. **Held-out ivar-weighted χ²/pixel = 2·val/nll_flux → target ≤ ~1.1**
    (1.0 = reconstruction statistically indistinguishable from the data
-   given DESI's own noise — the information-theoretic floor). v3 is at
-   1.08–1.12 by step 27k. AION does not report this; it is our stronger,
+   given DESI's own noise — the information-theoretic floor). The v2 run
+   is at 1.08–1.12 by step 27k. AION does not report this; it is our stronger,
    physically rigorous claim.
 2. **Pooled flux R² (SNR>3 slice) → the AION-comparable number** (their
    0.994). Two corrections make it apples-to-apples: (a) population —
@@ -1734,7 +1734,7 @@ the AION comparison? Four-row scorecard:
    is expected ≫ that). Added `val/flux_r2_pooled` and
    `val/flux_r2_pooled_snr3` (`flux_r2_terms` accumulators); logged from
    the next resume onward.
-3. **Codebook utilization ≥ ~50%** (v3: 64% and climbing; AION doesn't
+3. **Codebook utilization ≥ ~50%** (v2 run: 64% and climbing; AION doesn't
    report — our differentiator).
 4. **The decisive metric is downstream**: transformer-v2 trained on
    these tokens must beat v9 on honest masked_spec_acc and physical z
@@ -1779,7 +1779,7 @@ SpecPT (Park et al. 2025, ApJ 988:139, arXiv:2501.01070); OmniSpectra
 
 ### TOKENIZER — next steps (post-v3)
 
-T1. **Finish/early-stop v3 (now).** Gate on the 4-row scorecard
+T1. **Finish/early-stop the v2 training run (`tokenizer_v2_3k_v3`, now).** Gate on the 4-row scorecard
     (2026-06-11 entry). Early-stop when χ²/pixel and pooled-snr3-R²
     plateau — training past the noise floor is wasted GPU. Expect this
     well before 200k steps; check at every ~25k.
@@ -1861,7 +1861,7 @@ X9. **OOD on SDSS** with the wavelength-aware path (now physically
 
 ### Sequencing
 
-1. v3 tokenizer to gate (T1) — sessions already underway.
+1. v2 tokenizer run to gate (T1) — sessions already underway.
 2. T3 token audit + T2 decoder polish + X1 pre-tokenization in the
    same window (independent of each other).
 3. Transformer v2 run = X2+X3+X5 together (one rewrite, one campaign),
@@ -1874,3 +1874,19 @@ matches/beats AION-1's spectrum rows on property estimation (X7),
 with redshift NMAD competitive with SpecPT (X4/X6) *from a generative
 token model that also reconstructs spectra* — neither baseline does
 both.
+
+
+## 2026-06-12: Naming convention (to stop the v2/v3 jumble)
+
+- **Tokenizer GENERATIONS** = recipe versions. v1 = released MSE/stretch
+  codec (`spectrum_tokenizer_v1`). **v2 = the current recipe** (Huber
+  ivar-NLL, joint capped entropy, wavelength-aware grid, balanced
+  manifest). A hypothetical v3 generation would be a new recipe (e.g.
+  native-resolution / multi-survey).
+- **RUN ATTEMPTS** of a generation get suffixes: `tokenizer_v2_3k_ddp`
+  (attempt 1, entropy overshoot), `tokenizer_v2_3k_ddp2` (attempt 2,
+  spike collapse), `tokenizer_v2_3k_v3` (attempt 3, healthy, current).
+  "v3" in run names means third attempt of the v2 generation, NOT a
+  third-generation tokenizer.
+- The artifact this campaign releases is **tokenizer v2** =
+  `tokenizer_v2_3k_v3`'s best checkpoint.
