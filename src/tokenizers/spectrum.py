@@ -639,6 +639,28 @@ class SpectrumTokenizer(nn.Module):
         return recon, loss, indices
 
 
+def flux_r2_terms(flux_true: torch.Tensor, flux_recon: torch.Tensor,
+                  ivar: torch.Tensor = None):
+    """Per-spectrum (ss_res, ss_tot) over ivar>0 pixels, baseline = each
+    spectrum's own mean. Accumulate across batches and form
+    1 - sum(ss_res)/sum(ss_tot) for the POOLED R^2 — the corpus-level
+    number a single 'reconstruction R^2' (e.g. AION's 0.994) reports.
+    Pooling weights spectra by their variance, so bright spectra dominate;
+    the per-spectrum mean (flux_r2) treats all spectra equally and reads
+    much lower on faint-heavy corpora."""
+    flux_true = flux_true.float()
+    flux_recon = flux_recon.float()
+    if ivar is None:
+        valid = torch.ones_like(flux_true)
+    else:
+        valid = (ivar > 0).float()
+    n = valid.sum(dim=-1).clamp(min=1.0)
+    mean = (flux_true * valid).sum(dim=-1, keepdim=True) / n.unsqueeze(-1)
+    ss_res = ((flux_true - flux_recon).square() * valid).sum(dim=-1)
+    ss_tot = ((flux_true - mean).square() * valid).sum(dim=-1)
+    return ss_res, ss_tot
+
+
 def flux_r2(flux_true: torch.Tensor, flux_recon: torch.Tensor,
             ivar: torch.Tensor = None, reduce: bool = True) -> torch.Tensor:
     """Mean per-spectrum R^2 of the flux reconstruction.
@@ -663,17 +685,8 @@ def flux_r2(flux_true: torch.Tensor, flux_recon: torch.Tensor,
     Returns:
         scalar tensor (reduce=True) or (B,) tensor (reduce=False)
     """
-    flux_true = flux_true.float()
-    flux_recon = flux_recon.float()
-    if ivar is None:
-        valid = torch.ones_like(flux_true)
-    else:
-        valid = (ivar > 0).float()
-    n = valid.sum(dim=-1).clamp(min=1.0)
-    mean = (flux_true * valid).sum(dim=-1, keepdim=True) / n.unsqueeze(-1)
-    ss_res = ((flux_true - flux_recon).square() * valid).sum(dim=-1)
-    ss_tot = ((flux_true - mean).square() * valid).sum(dim=-1).clamp(min=1e-12)
-    r2 = 1.0 - ss_res / ss_tot
+    ss_res, ss_tot = flux_r2_terms(flux_true, flux_recon, ivar=ivar)
+    r2 = 1.0 - ss_res / ss_tot.clamp(min=1e-12)
     return r2.mean() if reduce else r2
 
 

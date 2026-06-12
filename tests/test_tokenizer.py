@@ -488,3 +488,30 @@ class TestHuberNLL:
         # Quadratic would add ~0.5*(1000*err)^2 / n ~ O(1e4); Huber keeps the
         # spike's contribution within a couple of nats of the baseline.
         assert l_spike["nll_flux"].item() < l_base["nll_flux"].item() + 5.0
+
+
+class TestPooledR2:
+    """Pooled R^2 (sum ss_res / sum ss_tot) weights spectra by variance —
+    the corpus-level convention behind single-number reconstruction R^2
+    reports (AION: 0.994). Distinct from the per-spectrum mean."""
+
+    def test_terms_perfect_reconstruction(self):
+        from src.tokenizers.spectrum import flux_r2_terms
+        flux = torch.randn(3, 200)
+        ss_res, ss_tot = flux_r2_terms(flux, flux)
+        assert torch.allclose(ss_res, torch.zeros(3))
+        assert (ss_tot > 0).all()
+
+    def test_pooled_dominated_by_bright_spectrum(self):
+        from src.tokenizers.spectrum import flux_r2_terms, flux_r2
+        torch.manual_seed(0)
+        bright = 100.0 * torch.randn(1, 500)   # high variance, perfect recon
+        faint = torch.randn(1, 500)            # low variance, garbage recon
+        flux = torch.cat([bright, faint])
+        recon = torch.cat([bright, torch.zeros_like(faint)])
+        ss_res, ss_tot = flux_r2_terms(flux, recon)
+        pooled = 1.0 - ss_res.sum() / ss_tot.sum()
+        mean_r2 = flux_r2(flux, recon)
+        # Pooled ~1 (bright dominates); per-spectrum mean ~0.5.
+        assert pooled.item() > 0.99
+        assert mean_r2.item() < 0.6

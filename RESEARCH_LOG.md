@@ -1713,3 +1713,35 @@ past the init transient, before any real collapse window (earliest
 observed onset: ~5.2k). Silver lining: the abort path is proven — rank 0
 raised and srun terminated all ranks cleanly within seconds. Relaunch
 the same v3 command (fresh W&B run; 340 lost steps are immaterial).
+
+## 2026-06-11 (cont.): tokenizer success criteria defined + pooled R² metric
+
+Question settled before v3 finishes: what gates tokenizer v2 and what is
+the AION comparison? Four-row scorecard:
+
+1. **Held-out ivar-weighted χ²/pixel = 2·val/nll_flux → target ≤ ~1.1**
+   (1.0 = reconstruction statistically indistinguishable from the data
+   given DESI's own noise — the information-theoretic floor). v3 is at
+   1.08–1.12 by step 27k. AION does not report this; it is our stronger,
+   physically rigorous claim.
+2. **Pooled flux R² (SNR>3 slice) → the AION-comparable number** (their
+   0.994). Two corrections make it apples-to-apples: (a) population —
+   their SDSS+SV3 corpus is much brighter than our dark-heavy balanced
+   manifest, so compare on the median-SNR>3 slice; (b) pooling — a
+   corpus-level R² is Σss_res/Σss_tot, dominated by high-variance bright
+   spectra, NOT the per-spectrum mean (which reads far lower on faint
+   corpora: v3's per-spectrum snr3 mean is 0.654 while its pooled value
+   is expected ≫ that). Added `val/flux_r2_pooled` and
+   `val/flux_r2_pooled_snr3` (`flux_r2_terms` accumulators); logged from
+   the next resume onward.
+3. **Codebook utilization ≥ ~50%** (v3: 64% and climbing; AION doesn't
+   report — our differentiator).
+4. **The decisive metric is downstream**: transformer-v2 trained on
+   these tokens must beat v9 on honest masked_spec_acc and physical z
+   metrics (NMAD σ of Δz/(1+z), outlier fraction). The tokenizer is an
+   intermediate; this is what "better than AION" means operationally.
+
+Caveat noted: per-spectrum-mean R² vs noisy input is bounded ≪ 1 for
+faint targets no matter how good the codec is; pooled+sliced is the
+fair external number, χ² is the internal truth. Tests: pooled R²
+bright-domination + perfect-reconstruction terms. 160 passed.
