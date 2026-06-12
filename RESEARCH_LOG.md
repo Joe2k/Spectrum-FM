@@ -1745,3 +1745,132 @@ Caveat noted: per-spectrum-mean R² vs noisy input is bounded ≪ 1 for
 faint targets no matter how good the codec is; pooled+sliced is the
 fair external number, χ² is the internal truth. Tests: pooled R²
 bright-domination + perfect-reconstruction terms. 160 passed.
+
+---
+
+## 2026-06-11: Deep research — next steps after tokenizer v2 (tokenizer + transformer roadmap v2)
+
+External landscape check (June 2026), then the plan. Sources:
+SpecPT (Park et al. 2025, ApJ 988:139, arXiv:2501.01070); OmniSpectra
+(arXiv:2601.15351); Universal Spectral Tokenization (NeurIPS ML4PS
+2025, arXiv:2510.17959); AION-1 (Parker et al. 2025); AstroCLIP
+(arXiv:2310.03024).
+
+### The competitive bar (changed since the AION-only framing)
+
+- **SpecPT** is now the redshift bar, not AION: a spectroscopy
+  pre-trained transformer on DESI EDR reporting **NMAD σ = 0.0006 (BGS)
+  / 0.0008 (ELG)** with **catastrophic outlier fractions 0.20% / 0.80%**
+  over 0 < z < 1.6. Our 4096-bin z vocabulary has ~0.001 *average* bin
+  width — CDF-equalized, so galaxy-dense regions are finer — meaning the
+  token approach is not resolution-limited vs SpecPT, but only barely.
+  To beat SpecPT we likely need sub-bin precision (expected-value decode
+  over the softmax, or a refinement head; see X6).
+- **OmniSpectra** (2026): 42.5M-param unified FM on 5.5M spectra across
+  DESI EDR + SDSS + APOGEE + VIPERS at **native resolution** — validates
+  both our scale regime (we have 2.9M now, 8M+ available in DR1 alone)
+  and the wavelength-aware direction; their cross-survey transfer is the
+  capability our fixed-grid resampler (roadmap item 9, done) unblocks.
+- **Universal Spectral Tokenization** (NeurIPS ML4PS 2025): sequence-
+  level SSL tokenizer on native grids across SDSS/DESI/GALAH/APOGEE —
+  evidence the field is converging on survey-agnostic tokenization;
+  our GRID_WAVE design is compatible but grid-locked. Native-resolution
+  variable-length tokenization is the v3-tokenizer-era question, not now.
+
+### TOKENIZER — next steps (post-v3)
+
+T1. **Finish/early-stop v3 (now).** Gate on the 4-row scorecard
+    (2026-06-11 entry). Early-stop when χ²/pixel and pooled-snr3-R²
+    plateau — training past the noise floor is wasted GPU. Expect this
+    well before 200k steps; check at every ~25k.
+T2. **Decoder-only polish (cheap, after T1).** Freeze encoder+quantizer
+    (tokens fixed!), fine-tune the decoder alone for ~20-30k steps at
+    low lr. Standard VQ trick: squeezes reconstruction without changing
+    any token id — the transformer can start training in parallel since
+    tokens are frozen at T1.
+T3. **Token robustness audit (before transformer commits).** New: check
+    token *stability* — tokenize the same object's spectrum with noise
+    realizations (add noise ~ivar) and measure token flip rate. High
+    flip rate = the transformer learns noise, not spectra. Also
+    per-(survey,program) codebook usage and χ², to verify dark-program
+    spectra aren't second-class. ~1 notebook, no training.
+T4. **Codebook capacity ablation (only if T1 gates fail).** Options in
+    order of preference: (a) dim 12 → 4096 codes (AION's image tokenizer
+    plateaued at 2^12; our entropy machinery generalizes — exact joint
+    entropy still cheap at 4096); (b) fewer downsamples → 546 tokens
+    (2× sequence cost for the transformer — expensive downstream);
+    (c) residual/2-level quantization (RVQ) — more expressive, same
+    length, but complicates the transformer vocab. Decision metric:
+    χ² stuck ≫ 1.0 on bright spectra (capacity-limited) vs χ² ≈ 1
+    everywhere (done, no ablation needed).
+T5. **Scale data before scaling model** (5k/10k manifests, commands
+    ready). Only worthwhile if T1 shows a train/val gap (underfit on
+    breadth) — at 24M params over 2.9M spectra, the model is small;
+    epochs at 200k steps ≈ 9. If val tracks train closely, more data
+    buys robustness, not metrics.
+T6. **EMA weights** (AION used decay 0.9999 on a tokenizer): cheap
+    stability for the *released* checkpoint; evaluate EMA vs raw on the
+    val pass before adopting.
+T7. **Defer**: SDSS co-training (multi-survey tokenizer) and native-
+    resolution tokenization — real wins (OmniSpectra/UST prove it) but
+    they reset the token vocabulary again; do after the v2 transformer
+    demonstrates the pipeline end-to-end.
+
+### TRANSFORMER — next steps (v2 campaign, starts when T1+T2 gate)
+
+X1. **Pre-tokenize the corpus first** (roadmap 6). One pass of the
+    frozen v2 tokenizer over the manifest → cache (272 token ids + z +
+    spectype + healpix) per spectrum. Removes the ConvNeXt forward from
+    every training step (the current throughput ceiling), makes
+    transformer steps tiny, enables big batches. ~1 GPU-day once.
+X2. **Masked-targets-only objective** (roadmap 3): targets = -100 at
+    encoder-visible spectrum positions. Sample the mask ratio per batch
+    from ~U(0.15, 0.75) instead of fixed 0.5 — trains the model for
+    every conditioning level and is the prerequisite for MaskGIT/ROAR-
+    style iterative decoding later (roadmap 3b, separate decision).
+X3. **Activate 4096 z bins + fp32 soft labels** (roadmap items 1+5):
+    --z-bins 4096, --redshift-soft-sigma ~16-24 bins (the 256-bin 1.5
+    rescaled), soft-CE computed in fp32/bf16. Train with conditioning
+    dropout 0.5 as in v9.
+X4. **Physical z metrics in eval** (roadmap 4): NMAD σ of Δz/(1+z),
+    catastrophic outlier fraction (|Δz|/(1+z) > 0.0033 *and* the 0.15
+    convention — report both), per spectype. These are SpecPT's units;
+    without them no comparison is possible.
+X5. **Engineering with the rewrite** (roadmap 8): SDPA/Flash attention,
+    KV cache in generate(), bf16 (the tokenizer campaign's stability
+    lessons apply verbatim), and port the circuit-breaker pattern
+    (watch redshift-head health, not codebook).
+X6. **Sub-bin redshift decoding**: decode ẑ as the softmax-weighted
+    mean over bin centers (expected value) instead of argmax → smooth
+    estimator below bin resolution; free at inference. If NMAD still
+    floors at bin width, add a small refinement head (predict Δz within
+    the argmax bin). This is the credible path past SpecPT's 6e-4.
+X7. **Embedding probe suite** (roadmap 7) — the "understanding" claim:
+    frozen encoder + linear/MLP probes for z, spectype, PROVABGS galaxy
+    properties, Zhang+24 stellar params; mean + attentive pooling;
+    報告 vs AION Table 1/3 Sp rows and OmniSpectra where overlapping.
+X8. **Uncertainty/calibration**: the 4096-way softmax is a discretized
+    z-posterior for free — check calibration (PIT histograms), use
+    entropy/multi-modality to flag catastrophic outliers. SpecPT-level
+    outlier fractions likely require rejecting uncertain predictions;
+    a calibrated posterior is also a differentiator vs point-estimate
+    baselines.
+X9. **OOD on SDSS** with the wavelength-aware path (now physically
+    correct) — the generalization claim, and the bridge toward
+    multi-survey training later.
+
+### Sequencing
+
+1. v3 tokenizer to gate (T1) — sessions already underway.
+2. T3 token audit + T2 decoder polish + X1 pre-tokenization in the
+   same window (independent of each other).
+3. Transformer v2 run = X2+X3+X5 together (one rewrite, one campaign),
+   eval with X4 from step one.
+4. X6-X9 on the trained model; X7 is the paper's centerpiece table.
+5. T4/T5/T7 only on gate failure or after the campaign.
+
+Target claim, stated once: a unimodal DESI FM whose frozen encoder
+matches/beats AION-1's spectrum rows on property estimation (X7),
+with redshift NMAD competitive with SpecPT (X4/X6) *from a generative
+token model that also reconstructs spectra* — neither baseline does
+both.
