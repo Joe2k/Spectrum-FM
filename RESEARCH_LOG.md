@@ -2110,3 +2110,54 @@ reconstruction cost — a possible v3-generation experiment, not warranted now.
 
 **T3 closed. Tokenizer v2 frozen (final.pt). Next: X1 pre-tokenize the corpus,
 then the transformer-v2 campaign (X2+X3+X5, eval X4).**
+
+
+---
+
+## 2026-06-13 (cont.): X1 — corpus pre-tokenization (cache the frozen v2 tokens)
+
+The transformer ran the ConvNeXt encoder on every step (`tokenize_and_build` →
+`spec_tok.encode`) on top of per-step FITS stitching — the throughput ceiling.
+Tokenizer v2 is frozen, so its tokens are fixed: run the encoder once, cache the
+codes, make every step a tiny array read. Implemented end-to-end (writer + reader
++ train wiring + correctness proof).
+
+**Shard format** — one compressed `.npz` per (survey, program, healpix),
+`{survey}_{program}_{healpix}.npz`: `indices` (N, n_tokens) uint16 **raw codes
+0..1023** (offset added at train time, unchanged), `z`/`denorm` float32, quality
+flags `zwarn`/`fiberstatus`/`nonzero_flux`, and `spectype`/`targetid`/`row` +
+`coadd`/`redrock` provenance for X4/X7/X9. Raw z is cached (not binned) so
+`--z-bins`/4096 stays a train-time choice. ~575 B/spectrum → ~5 GB for 8.9M.
+
+**Writer** `nersc/pretokenize_corpus.py`: streams the manifest one healpix at a
+time (reuses `stitch_bands`), encodes on GPU, writes a shard. DDP-aware
+(`records[rank::world]`), **resumable** (skips existing shards → survives the 4h
+interactive cap), `--quality {all,strict}` (default all = tokenize every row +
+store flags), and a built-in `--verify` that re-encodes cached spectra from their
+source FITS and asserts token-for-token equality.
+
+**Reader** `DR1CachedTokenDataset` (+ `collate_cached_skip_none`,
+`collect_redshifts_from_cache`) in `nersc/dr1_tokenized_dataset.py`: builds the
+flat index applying the quality cut from the stored flags (default reproduces
+today's training cut), MRU shard cache, `meta_for_index` for audit parity.
+
+**Integration**: `tokenize_and_build` gains a one-line branch — use
+`raw_batch["spec_indices"]` when present (skip encode; `spec_tok` may be None),
+everything after (offset, encoder/redshift masking, A/B assembly) unchanged.
+`train_transformer.py` gains `--tokenized-dir`: builds the cached dataset over
+the healpix-split shards, **skips loading the spectrum tokenizer entirely**, fits
+z_tok from cached z. Unset → the current on-the-fly path, zero behavior change.
+
+**Correctness proof** (`tests/test_pretokenize.py`, 12 tests): a CPU roundtrip
+(no FITS) shows cached indices == `encode()`, and `tokenize_and_build(cached)` ==
+`tokenize_and_build(flux, spec_tok)` element-for-element — both sequences AND
+mask positions, with masking RNG fixed. Plus reader filter/collate/meta units.
+Full suite 201 passed (1 pre-existing unrelated wandb-offline test fails with or
+without these changes).
+
+Run (NERSC): `pretokenize_corpus.py --manifest <balanced> --tokenizer-ckpt
+final.pt --out <dir> --amp` (interactive, resumable), then `--verify`, then
+`train_transformer.py --tokenized-dir <dir> …`. Corpus is the `--manifest` arg —
+recommend the balanced DR1 manifest scaled to 5k/10k. **Next: transformer-v2
+campaign (X2 masked-targets-only, X3 4096 z-bins + soft labels, X5 SDPA/bf16,
+eval X4 NMAD/outliers).**

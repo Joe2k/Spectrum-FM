@@ -63,15 +63,27 @@ from dr1_dataset import (  # noqa: E402
     collate_dr1_skip_none,
     load_manifest,
 )
-from dr1_tokenized_dataset import collect_redshifts  # noqa: E402
+from dr1_tokenized_dataset import (  # noqa: E402
+    DR1CachedTokenDataset,
+    collate_cached_skip_none,
+    collect_redshifts,
+    collect_redshifts_from_cache,
+)
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Train SpectrumTransformer on DR1")
     # Data
     p.add_argument("--manifest", type=Path, required=True)
-    p.add_argument("--tokenizer-ckpt", type=Path, required=True,
-                   help="Pretrained SpectrumTokenizer .pt (best.pt or final.pt)")
+    p.add_argument("--tokenizer-ckpt", type=Path, default=None,
+                   help="Pretrained SpectrumTokenizer .pt (best.pt or final.pt). "
+                        "Required for on-the-fly tokenization; unused with "
+                        "--tokenized-dir (the encoder isn't loaded).")
+    p.add_argument("--tokenized-dir", type=Path, default=None,
+                   help="Directory of pre-tokenized shards from "
+                        "pretokenize_corpus.py (X1). When set, training reads "
+                        "cached token ids instead of running the ConvNeXt "
+                        "encoder every step; the spectrum tokenizer is not loaded.")
     p.add_argument("--resume", type=Path, default=None,
                    help="Resume from a full-state checkpoint (best.pt or "
                         "final.pt): restores model, optimizer, scaler, step "
@@ -163,6 +175,21 @@ def parse_args():
     return p.parse_args()
 
 
+def _records_to_shards(records, tokenized_dir):
+    """Map manifest records to existing pre-tokenized shard paths.
+
+    Same naming as pretokenize_corpus.shard_name (survey_program_healpix.npz).
+    Silently drops records whose shard hasn't been written yet, so a partially
+    pre-tokenized corpus still trains on whatever is cached.
+    """
+    out = []
+    for r in records:
+        p = Path(tokenized_dir) / f"{r['survey']}_{r['program']}_{r['healpix']}.npz"
+        if p.exists():
+            out.append(p)
+    return out
+
+
 def main():
     args = parse_args()
     if args.smoke:
@@ -228,19 +255,38 @@ def main():
     print(f"[data] healpix split: {len(train_records)} train, "
           f"{len(val_records)} val (frac={args.healpix_holdout_frac})")
 
-    # Pretrained spectrum tokenizer (lives on GPU in main process; never forked)
-    print(f"[tok] loading spectrum tokenizer {args.tokenizer_ckpt}")
-    spec_tok = SpectrumTokenizer().to(device)
-    ckpt = torch.load(args.tokenizer_ckpt, map_location=device, weights_only=False)
-    sd = ckpt.get("model", ckpt) if isinstance(ckpt, dict) else ckpt
-    spec_tok.load_state_dict(sd)
-    spec_tok.eval()
-    for p in spec_tok.parameters():
-        p.requires_grad_(False)
+    cached = args.tokenized_dir is not None
 
-    # Fit redshift tokenizer on a sample of TRAIN manifest redshifts
-    print(f"[tok] fitting redshift tokenizer on up to {args.z_fit_files} redrock files")
-    zs = collect_redshifts(train_records, max_files=args.z_fit_files)
+    # Pretrained spectrum tokenizer. On the cached path the encoder is never
+    # loaded — tokens come from the shards, so there's no ConvNeXt in memory and
+    # no per-step encode (the whole point of X1).
+    if cached:
+        spec_tok = None
+        print(f"[tok] cached tokens from {args.tokenized_dir} — encoder not loaded")
+    else:
+        if args.tokenizer_ckpt is None:
+            print("ERROR: --tokenizer-ckpt is required without --tokenized-dir",
+                  file=sys.stderr)
+            sys.exit(1)
+        print(f"[tok] loading spectrum tokenizer {args.tokenizer_ckpt}")
+        spec_tok = SpectrumTokenizer().to(device)
+        ckpt = torch.load(args.tokenizer_ckpt, map_location=device, weights_only=False)
+        sd = ckpt.get("model", ckpt) if isinstance(ckpt, dict) else ckpt
+        spec_tok.load_state_dict(sd)
+        spec_tok.eval()
+        for p in spec_tok.parameters():
+            p.requires_grad_(False)
+
+    # Fit redshift tokenizer on a sample of TRAIN redshifts (from the cache when
+    # available, else by scanning redrock files).
+    if cached:
+        train_shards = _records_to_shards(train_records, args.tokenized_dir)
+        val_shards = _records_to_shards(val_records, args.tokenized_dir)
+        print(f"[tok] fitting redshift tokenizer from cached z ({len(train_shards)} shards)")
+        zs = collect_redshifts_from_cache(train_shards, max_files=args.z_fit_files)
+    else:
+        print(f"[tok] fitting redshift tokenizer on up to {args.z_fit_files} redrock files")
+        zs = collect_redshifts(train_records, max_files=args.z_fit_files)
     print(f"[tok]   gathered {len(zs)} z values, min={zs.min():.4f} max={zs.max():.4f}")
     if len(zs) < 20 * args.z_bins:
         print(f"[tok]   WARN: only {len(zs)} z values for {args.z_bins} bins "
@@ -255,19 +301,26 @@ def main():
           f"median={widths.median():.5f} p90={widths.quantile(0.9):.5f} "
           f"max={widths.max():.5f}")
 
-    # Build separate datasets for each partition.
-    train_ds = DR1IndexedDataset(
-        train_records,
-        require_good_zwarn=True,
-        require_nonzero_flux=True,
-        max_spectra=args.max_spectra,
-    )
-    val_ds = DR1IndexedDataset(
-        val_records,
-        require_good_zwarn=True,
-        require_nonzero_flux=True,
-        max_spectra=None if args.max_spectra is None else max(50, args.max_spectra // 10),
-    )
+    # Build separate datasets for each partition. The cached path reads
+    # pre-tokenized shards (no FITS, no encode); both paths apply the same
+    # quality cut and produce batches tokenize_and_build consumes identically.
+    val_cap = None if args.max_spectra is None else max(50, args.max_spectra // 10)
+    if cached:
+        collate = collate_cached_skip_none
+        train_ds = DR1CachedTokenDataset(
+            train_shards, require_good_zwarn=True, require_nonzero_flux=True,
+            max_spectra=args.max_spectra)
+        val_ds = DR1CachedTokenDataset(
+            val_shards, require_good_zwarn=True, require_nonzero_flux=True,
+            max_spectra=val_cap)
+    else:
+        collate = collate_dr1_skip_none
+        train_ds = DR1IndexedDataset(
+            train_records, require_good_zwarn=True, require_nonzero_flux=True,
+            max_spectra=args.max_spectra)
+        val_ds = DR1IndexedDataset(
+            val_records, require_good_zwarn=True, require_nonzero_flux=True,
+            max_spectra=val_cap)
     print(f"[data] train_ds={len(train_ds)} val_ds={len(val_ds)}")
 
     train_sampler = DistributedSampler(train_ds, shuffle=True) if is_distributed else None
@@ -277,7 +330,7 @@ def main():
         shuffle=(train_sampler is None),
         sampler=train_sampler,
         num_workers=args.num_workers,
-        collate_fn=collate_dr1_skip_none,
+        collate_fn=collate,
         pin_memory=device.type == "cuda",
         persistent_workers=args.num_workers > 0,
         drop_last=True,
@@ -287,7 +340,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=max(0, args.num_workers // 2),
-        collate_fn=collate_dr1_skip_none,
+        collate_fn=collate,
         pin_memory=device.type == "cuda",
     )
 

@@ -137,6 +137,156 @@ def collate_tokenized_skip_none(batch):
     }
 
 
+class DR1CachedTokenDataset(Dataset):
+    """Reads pre-tokenized shards written by `pretokenize_corpus.py` (X1).
+
+    Each shard is one (survey, program, healpix) `.npz` with parallel arrays
+    over the coadd's rows: `indices` (N, n_tokens) raw codes 0..1023, `z`,
+    `denorm`, `zwarn`, `fiberstatus`, `nonzero_flux`, `spectype`, `targetid`,
+    `row`, plus scalar `survey`/`program`/`healpix`. This makes every
+    transformer step a fast array read instead of a ConvNeXt encode — the
+    item carries the RAW codes, so `tokenize_and_build` adds the offset and
+    builds sequences exactly as on the on-the-fly path.
+
+    The quality filter (zwarn / fiberstatus / nonzero-flux) is applied from
+    the STORED flags at index-build time, so the default read reproduces the
+    training cut even when the shards were written with `--quality all`.
+
+    Args:
+        shards: a directory (globs `*.npz`) or an explicit list of shard paths.
+        require_good_zwarn: keep only rows with zwarn == 0 and fiberstatus == 0.
+        require_nonzero_flux: keep only rows flagged nonzero-flux.
+        max_spectra: cap total kept rows (smoke).
+        cache_size: number of recently-touched shards kept in memory.
+    """
+
+    def __init__(
+        self,
+        shards,
+        require_good_zwarn: bool = True,
+        require_nonzero_flux: bool = True,
+        max_spectra=None,
+        cache_size: int = 2,
+    ):
+        import numpy as np
+
+        if isinstance(shards, (str, Path)):
+            shard_paths = sorted(Path(shards).glob("*.npz"))
+        else:
+            shard_paths = [Path(s) for s in shards]
+        if not shard_paths:
+            raise FileNotFoundError(f"no .npz shards found under {shards!r}")
+        self.shard_paths = shard_paths
+        self.cache_size = max(1, cache_size)
+
+        self.flat_index = []                 # (shard_idx, row_in_shard)
+        self.shard_meta = []                 # (survey, program, healpix) per shard
+        stop = False
+        for si, p in enumerate(shard_paths):
+            with np.load(p, allow_pickle=False) as d:
+                n = int(d["indices"].shape[0])
+                zwarn = d["zwarn"] if "zwarn" in d.files else np.zeros(n, np.int16)
+                fstat = d["fiberstatus"] if "fiberstatus" in d.files else np.zeros(n, np.int32)
+                nzf = d["nonzero_flux"] if "nonzero_flux" in d.files else np.ones(n, np.int8)
+                self.shard_meta.append((
+                    str(d["survey"]) if "survey" in d.files else "unknown",
+                    str(d["program"]) if "program" in d.files else "unknown",
+                    int(d["healpix"]) if "healpix" in d.files else -1,
+                ))
+            keep = np.ones(n, dtype=bool)
+            if require_good_zwarn:
+                keep &= (zwarn == 0) & (fstat == 0)
+            if require_nonzero_flux:
+                keep &= nzf.astype(bool)
+            for r in np.nonzero(keep)[0]:
+                self.flat_index.append((si, int(r)))
+                if max_spectra is not None and len(self.flat_index) >= max_spectra:
+                    stop = True
+                    break
+            if stop:
+                break
+
+        self._cache: dict = {}
+        self._order: list = []
+
+    def __len__(self):
+        return len(self.flat_index)
+
+    def meta_for_index(self, idx):
+        """(survey, program) for a flat index — parity with the audit tooling."""
+        si, _ = self.flat_index[idx]
+        s, p, _ = self.shard_meta[si]
+        return (s, p)
+
+    def _load(self, si):
+        import numpy as np
+
+        if si in self._cache:
+            return self._cache[si]
+        if len(self._order) >= self.cache_size:
+            ev = self._order.pop(0)
+            self._cache.pop(ev, None)
+        with np.load(self.shard_paths[si], allow_pickle=False) as d:
+            data = {
+                "indices": d["indices"],
+                "z": d["z"],
+                "spectype": d["spectype"] if "spectype" in d.files else None,
+                "targetid": d["targetid"] if "targetid" in d.files else None,
+            }
+        self._cache[si] = data
+        self._order.append(si)
+        return data
+
+    def __getitem__(self, idx):
+        import numpy as np
+
+        si, r = self.flat_index[idx]
+        d = self._load(si)
+        item = {
+            "spec_indices": torch.from_numpy(d["indices"][r].astype(np.int64)),
+            "z": torch.tensor(float(d["z"][r]), dtype=torch.float32),
+        }
+        if d["spectype"] is not None:
+            item["spectype"] = str(d["spectype"][r])
+        if d["targetid"] is not None:
+            item["targetid"] = int(d["targetid"][r])
+        return item
+
+
+def collate_cached_skip_none(batch):
+    """Stack pre-tokenized items. spec_indices is fixed width, so no padding."""
+    batch = [b for b in batch if b is not None]
+    if not batch:
+        return None
+    return {
+        "spec_indices": torch.stack([b["spec_indices"] for b in batch]),
+        "z": torch.stack([b["z"] for b in batch]),
+    }
+
+
+def collect_redshifts_from_cache(shards, max_files=None):
+    """Pull good-zwarn redshifts from pre-tokenized shards to fit RedshiftTokenizer.
+
+    Avoids reopening redrock FITS when training from the X1 cache.
+    """
+    import numpy as np
+
+    if isinstance(shards, (str, Path)):
+        shard_paths = sorted(Path(shards).glob("*.npz"))
+    else:
+        shard_paths = [Path(s) for s in shards]
+    n_scan = len(shard_paths) if max_files is None else min(max_files, len(shard_paths))
+    zs = []
+    for p in shard_paths[:n_scan]:
+        with np.load(p, allow_pickle=False) as d:
+            z = d["z"]
+            zwarn = d["zwarn"] if "zwarn" in d.files else np.zeros(len(z), np.int16)
+            zs.append(z[zwarn == 0].astype("float32").copy())
+    if not zs:
+        return torch.zeros(0)
+    return torch.from_numpy(np.concatenate(zs))
+
+
 def collect_redshifts(records, max_files=None):
     """Open redrock files in a manifest and pull all Z values.
 

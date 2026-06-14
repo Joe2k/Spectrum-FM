@@ -44,9 +44,13 @@ def tokenize_and_build(
     """Convert a raw spectrum batch into transformer-ready sequences.
 
     Args:
-        raw_batch: dict with "flux" (B, L), "ivar" (B, L), "z" (B,) tensors.
-            Produced by `collate_dr1_skip_none` or equivalent.
-        spec_tok: a frozen `SpectrumTokenizer` (eval mode).
+        raw_batch: dict with "flux" (B, L), "ivar" (B, L), "z" (B,) tensors
+            (produced by `collate_dr1_skip_none`), OR the pre-tokenized form
+            with "spec_indices" (B, n_tokens) raw codes + "z" (B,) from
+            `collate_cached_skip_none` (the X1 cache) — in which case the
+            spectrum encode is skipped and `spec_tok` may be None.
+        spec_tok: a frozen `SpectrumTokenizer` (eval mode); unused/None when
+            `raw_batch` carries "spec_indices".
         z_tok: a fitted `RedshiftTokenizer`.
         approach: 'a' (encoder sees redshift) or 'b' (encoder does not).
         device: where the spectrum tokenizer + transformer live.
@@ -84,24 +88,30 @@ def tokenize_and_build(
     if not 0.0 <= redshift_mask_ratio <= 1.0:
         raise ValueError(f"redshift_mask_ratio must be in [0, 1], got {redshift_mask_ratio}")
 
-    flux = raw_batch["flux"].to(device, non_blocking=True)
-    ivar = raw_batch["ivar"].to(device, non_blocking=True)
     z_vals = raw_batch["z"]  # may stay on CPU; encode is per-item
 
-    istd = torch.sqrt(ivar.clamp(min=1e-10))
-    x = torch.stack([flux, istd], dim=1)  # (B, 2, L)
+    if "spec_indices" in raw_batch:
+        # Pre-tokenized path (X1 cache): the frozen tokenizer was run offline,
+        # so the ConvNeXt encode is skipped entirely. spec_tok may be None.
+        # Cached indices are the raw codes (0..1023), same as encode() returns.
+        spec_indices = raw_batch["spec_indices"].to(device)
+    else:
+        flux = raw_batch["flux"].to(device, non_blocking=True)
+        ivar = raw_batch["ivar"].to(device, non_blocking=True)
+        istd = torch.sqrt(ivar.clamp(min=1e-10))
+        x = torch.stack([flux, istd], dim=1)  # (B, 2, L)
 
-    wave = None
-    if wavelength_aware and "wavelength" in raw_batch:
-        wave = raw_batch["wavelength"].to(device, non_blocking=True)
+        wave = None
+        if wavelength_aware and "wavelength" in raw_batch:
+            wave = raw_batch["wavelength"].to(device, non_blocking=True)
 
-    with torch.no_grad():
-        # Only pass the kwarg when set, so legacy tokenizer wrappers/stubs
-        # without a `wavelength` parameter keep working.
-        if wave is not None:
-            spec_indices, _ = spec_tok.encode(x, wavelength=wave)
-        else:
-            spec_indices, _ = spec_tok.encode(x)  # (B, n_tokens) or (B, 1, n_tokens)
+        with torch.no_grad():
+            # Only pass the kwarg when set, so legacy tokenizer wrappers/stubs
+            # without a `wavelength` parameter keep working.
+            if wave is not None:
+                spec_indices, _ = spec_tok.encode(x, wavelength=wave)
+            else:
+                spec_indices, _ = spec_tok.encode(x)  # (B, n_tokens) or (B, 1, n_tokens)
     if spec_indices.dim() == 3:
         spec_indices = spec_indices.squeeze(1)
     spec_tokens = spec_indices.long() + SPECTRUM_TOKEN_OFFSET  # (B, T_spec)
