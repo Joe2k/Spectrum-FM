@@ -88,6 +88,17 @@ class DR1IndexedDataset(Dataset):
     def __len__(self) -> int:
         return len(self.flat_index)
 
+    def meta_for_index(self, idx: int) -> Tuple[str, str]:
+        """(survey, program) for a flat index, from its source manifest record.
+
+        Lets the token-stability audit break metrics down per
+        (survey, program) without touching __getitem__/collate. Records from
+        build_dr1_index.py carry both fields; missing ones map to "unknown".
+        """
+        rec_idx, _ = self.flat_index[idx]
+        rec = self.records[rec_idx]
+        return (str(rec.get("survey", "unknown")), str(rec.get("program", "unknown")))
+
     def _open(self, rec_idx: int):
         if rec_idx in self._hdul_cache:
             return self._hdul_cache[rec_idx]

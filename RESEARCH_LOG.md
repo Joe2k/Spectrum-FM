@@ -1891,3 +1891,130 @@ both.
   third-generation tokenizer.
 - The artifact this campaign releases is **tokenizer v2** =
   `tokenizer_v2_3k_v3`'s best checkpoint.
+
+
+---
+
+## 2026-06-12: Tokenizer v2 training COMPLETE — final results (run `waotf2n0`, 80k steps)
+
+The annealing resume finished cleanly: `tokenizer_v2_3k_v3` ran to its
+full 80,000-step budget (resumed from `last.pt` at ~54.7k, learning rate
+cosine-annealed 2.5e-4 → 3.0e-5) and W&B marks the run **finished** —
+the first tokenizer-v2 attempt to reach a natural end rather than a
+wallclock kill or a collapse. ~11.1h total GPU-time on the run id,
+2.11 steps/s, batch 32, bf16, 3k balanced manifest.
+
+### Final validation metrics (and what each means)
+
+| Metric | Final (step ~80k) | Best | Meaning |
+|---|---|---|---|
+| `val/nll_flux` | 0.5006 | **0.4983** @ 74.5k | Ivar-weighted Gaussian NLL per pixel; χ²/pixel = 2·nll |
+| **χ²/pixel** | 1.001 | **0.997** | 1.0 = reconstruction statistically indistinguishable from the observation given DESI's own noise. **We are AT the information-theoretic floor.** Gate was ≤1.1. |
+| `val/flux_r2_pooled_snr3` | 0.8762 | 0.8762 @ 73k | Corpus-pooled R² on the median-SNR>3 slice — the AION-comparable number (theirs: 0.994 on a much brighter SDSS-heavy corpus) |
+| `val/flux_r2_pooled` | 0.572 | — | Pooled R² over ALL spectra incl. very faint (R² vs noisy input is bounded ≪1 there regardless of codec quality) |
+| `val/flux_r2_snr3` | 0.6675 | — | Per-spectrum mean R², SNR>3 slice (harsh on faint corpora; internal tracking only) |
+| `val/codebook_use` | 70.7% | ~71% | Fraction of the 1024 LFQ codes active on val (gate ≥50%; v1 trial evidence was 3–8%) |
+| `val/istd_mse` | 0.033 | — | Noise-channel (inverse-std) reconstruction MSE, aux head |
+
+Annealing's contribution: nll 0.5144 → 0.4983 (χ² 1.029 → 0.997) from
+step 52k to 74.5k; pooled_snr3 0.8744 → 0.8762. Real but small — the run
+was already near-converged; the anneal bought the last ~3% of χ².
+
+### Scorecard vs the 2026-06-11 success criteria
+
+1. χ²/pixel ≤ ~1.1 → **0.997–1.001. PASSED, at the floor.** This is the
+   physically rigorous claim AION does not report.
+2. Pooled SNR>3 R² → **0.876** vs AION's 0.994. Not matched; the gap is
+   partly population (their corpus is far brighter; pooled R² rises with
+   corpus brightness by construction) and now bounded by the noise floor:
+   at χ²=1.0 the residual IS the noise, so on OUR corpus this number
+   cannot go materially higher with any codec. A same-corpus AION
+   measurement (or our codec on an SDSS-bright slice) is the only honest
+   head-to-head — deferred to X9.
+3. Codebook utilization ≥50% → **70.7%. PASSED** (v1: single-digit %).
+4. Downstream transformer-v2 → pending (the decisive gate).
+
+### Finding: best.pt selection is skewed by the entropy reward
+
+`best.pt` is keyed on `val/total` (pretrain_tokenizer.py), which includes
+the entropy auxiliary (a REWARD, capped). The surviving W&B artifact
+(`tokenizer_tokenizer_v2_3k_v3:v27`) is from **step 57,500**
+(val_total 0.477, nll ≈ 0.511, χ² ≈ 1.02) — `val/total` never beat that
+later because the sample-entropy term drifted up while reconstruction
+kept improving. The genuinely best reconstructor is the **end-of-run
+`last.pt` (step 80k, nll 0.5006)** / best-nll region ~74.5k.
+- **Decision: ship `last.pt`'s weights as the released tokenizer v2**
+  (χ² 1.001 vs 1.02, pooled_snr3 0.8762 vs ~0.875 — small but free).
+- **Fix for future runs**: select best on `val/recon` (nll_flux +
+  istd term) only, never on a total that mixes in auxiliary
+  rewards. (Applies to any v3-generation run.)
+
+### Status / next
+
+Tokenizer v2 is DONE — T1 gate passed. Proceed per the roadmap:
+T3 token-stability audit + T2 decoder-only polish (optional) + X1
+pre-tokenize the corpus with this checkpoint, then the transformer-v2
+campaign (X2+X3+X5).
+
+
+---
+
+## 2026-06-13: Freeze tokenizer v2 = final.pt + T3 stability-audit tooling
+
+### Freeze decision: ship final.pt, not best.pt or last.pt
+
+Compared the three checkpoints run `waotf2n0` produced (val metrics at each step):
+
+| Checkpoint | Step | χ²/pixel | pooled R² (SNR>3) | Codebook | On W&B? |
+|---|---|---|---|---|---|
+| best.pt (= artifact `…v2_3k_v3:v27`) | 57,500 | 1.0125 | 0.8752 | 69.2% | yes |
+| last.pt (rolling, health-gated) | ~78,000 | 1.0010 | 0.8762 | 70.2% | NERSC only |
+| **final.pt (end-of-run, LR floor 3e-5)** | ~80,000 | 1.0012 | 0.8762 | 70.7% | scratch + CFS |
+
+`final.pt` ≈ `last.pt` (identical to 3 decimals) and both beat the `best.pt`
+artifact by ~1% χ² — `best.pt` is selected on `val/total`, which mixes in the
+capped entropy *reward*, so it is not the best *reconstructor*. **Ship final.pt**:
+the fully-annealed terminal state, CFS-mirrored. (True χ² min was step 74.5k @
+0.9967, but no checkpoint exists there; the <0.5% gap is within val-set noise.)
+For future runs, select best.pt on `val/recon` (nll_flux + istd), never on a
+total that includes auxiliary rewards.
+
+**Release wiring (this commit):** `scripts/setup_release_checkpoints.py` gains a
+`spectrum_tokenizer_v2` entry + a `local_pt` source branch (final.pt is not a
+W&B artifact, so it is copied from a staged local file rather than downloaded).
+`src/inference/release.py` needs no change — `load_spectrum_tokenizer(model_id)`
+already resolves by model_id and builds a default `SpectrumTokenizer()`.
+`default_tokenizer` stays **v1** (the released v9 transformer was trained on v1
+tokens; a swapped codec would break it). v2 is an *available* tokenizer for the
+upcoming v2 transformer only. **User action on NERSC:** copy
+`$CFS/tokenizer_v2_3k_v3/final.pt` → `checkpoints/wandb_artifacts/spectrum_tokenizer_v2_final/best.pt`,
+then `python scripts/setup_release_checkpoints.py --copy`.
+
+### T3 token-stability audit (tooling landed; awaiting the NERSC run)
+
+New `nersc/audit_tokenizer_stability.py` — the last thing isolated metrics can
+tell us before the transformer campaign. Reuses the dataset, the *exact* training
+val split (`torch.randperm(seed)` recipe from pretrain_tokenizer.py), and
+`flux_r2_terms`. Two diagnostics, single I/O pass (grouped by survey/program):
+
+- **A. Noise-realization flip rate.** Re-draw the per-pixel noise (std =
+  1/√ivar) K times, re-tokenize, measure per-token flip rate vs the observed
+  spectrum's tokens, **stratified by per-token local SNR**. The diagnostic shape:
+  at χ²=1.0 the codec encodes detail down to the noise, so low-SNR tokens
+  flipping is *expected and benign*; high-SNR tokens must stay stable or the
+  transformer would learn noise. Reports per-spectrum median/p90, per-position
+  flip rate, and flip-vs-SNR bins.
+- **B. Per-(survey, program) equity.** χ²/pixel (= 2·nll_flux), pooled R² and
+  codebook usage per group, to confirm the balanced manifest didn't leave
+  dark-program spectra second-class. Needed a small reusable addition:
+  `DR1IndexedDataset.meta_for_index(i) → (survey, program)`.
+
+Soft acceptance (CLI-tunable): high-SNR(>3) flip rate < 0.15; every group
+χ²/pixel < 1.2 and codebook use > 0.30; flip rate falls with SNR. Emits
+`t3_stability.json` / `.md` / `.npz` and a PASS/FLAG verdict.
+
+Verified: 22 new audit unit tests + 37 tokenizer tests green; CPU smoke of the
+full `run_audit` driver on a synthetic dataset (random-init model → correct FLAG
+with all reasons, confirming the code path). On PASS of the real run → X1
+pre-tokenize corpus + transformer-v2 campaign (X2+X3+X5). No tokenizer retraining
+(already at the noise floor).

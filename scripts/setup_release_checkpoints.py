@@ -31,6 +31,21 @@ ARTIFACT_MAP = {
         "wandb_artifact": f"{WANDB_ENTITY}/{WANDB_PROJECT}/spectrum_tokenizer_v1:best",
         "role": "spectrum_tokenizer",
     },
+    # v2 ships final.pt (step ~80k, χ²≈1.00), NOT the best-val W&B artifact
+    # (step 57.5k): best.pt was selected on val/total, which mixes in the
+    # capped entropy reward, so the genuinely best reconstructor is the
+    # fully-annealed end-of-run state. final.pt is not a W&B artifact, so it
+    # is sourced from a local file staged under wandb_artifacts/ (see local_pt).
+    "spectrum_tokenizer_v2": {
+        "model_id": "spectrum_tokenizer_v2",
+        "display_name": "Spectrum-FM Spectrum Tokenizer v2 (Huber ivar-NLL, wavelength-aware, balanced DR1)",
+        "wandb_artifact": (
+            f"{WANDB_ENTITY}/{WANDB_PROJECT}/tokenizer_tokenizer_v2_3k_v3 "
+            "(run waotf2n0, final.pt @ step ~80k; not the best-val artifact)"
+        ),
+        "role": "spectrum_tokenizer",
+        "local_pt": "checkpoints/wandb_artifacts/spectrum_tokenizer_v2_final/best.pt",
+    },
     "approach_a_fm_v1_10k_a_ddp4_redmask50_v9": {
         "model_id": "approach_a_fm_v1_10k_a_ddp4_redmask50_v9",
         "display_name": "Spectrum-FM Transformer — Approach A (redshift conditioning dropout)",
@@ -109,7 +124,17 @@ def main() -> int:
     for artifact_name, meta in ARTIFACT_MAP.items():
         model_id = meta["model_id"]
         try:
-            src_pt = _find_wandb_pt(artifact_name)
+            if meta.get("local_pt"):
+                # Local-file source (e.g. a checkpoint that was never pushed
+                # to W&B, like tokenizer v2's final.pt). Stage it there first.
+                src_pt = (REPO / meta["local_pt"]).resolve()
+                if not src_pt.is_file():
+                    raise FileNotFoundError(
+                        f"local checkpoint {src_pt} not found — stage it there "
+                        f"(e.g. copy final.pt off NERSC, renamed to best.pt) "
+                        f"before running with --copy")
+            else:
+                src_pt = _find_wandb_pt(artifact_name)
         except FileNotFoundError as e:
             # Only some artifacts may be downloaded locally; skip the rest
             # instead of aborting (e.g. you pulled v9 but not the older v8).
