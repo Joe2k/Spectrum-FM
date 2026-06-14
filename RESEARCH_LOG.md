@@ -2161,3 +2161,27 @@ final.pt --out <dir> --amp` (interactive, resumable), then `--verify`, then
 recommend the balanced DR1 manifest scaled to 5k/10k. **Next: transformer-v2
 campaign (X2 masked-targets-only, X3 4096 z-bins + soft labels, X5 SDPA/bf16,
 eval X4 NMAD/outliers).**
+
+
+---
+
+## 2026-06-13 (cont.): Stratified train/val split for full DR1
+
+Decision: the transformer-v2 campaign trains on the FULL DR1 corpus (natural
+distribution), pre-tokenized once via X1 (frozen tokenizer is cross-survey
+validated by T3, so tokenizing unseen healpix is sound). The cache stores
+survey/program/spectype, so natural-vs-balanced sampling stays a train-time
+choice — no re-tokenization.
+
+`split_records_by_healpix` was already a seeded random `randperm` holdout (never
+a sequential block), but with full DR1's nested survey×program manifest ordering
+and a small holdout_frac, a plain pooled split represents rare categories (sv1)
+in val only in expectation. Upgraded to **stratified**: the holdout is drawn
+independently WITHIN each (survey, program) group (seeded), so every category
+appears in val at ~holdout_frac no matter how imbalanced the corpus, and any
+group with >1 healpix contributes at least one to val. This prevents a category
+from dominating/vanishing from val by chance and makes per-(survey,program) /
+per-spectype val metrics (X4) trustworthy. Records lacking the keys fall back to
+the prior plain random split (back-compatible). Still healpix-level (no
+same-pointing leakage). Tests: stratified representation, imbalanced corpus,
+not-sequential-by-category, tiny-category coverage, fallback. 205 passed.

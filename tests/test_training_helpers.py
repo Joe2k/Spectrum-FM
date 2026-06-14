@@ -315,6 +315,48 @@ class TestHealpixSplit:
         with pytest.raises(ValueError):
             split_records_by_healpix(recs, holdout_frac=1.0, seed=0)
 
+    def _cat_records(self, spec):
+        """spec: list of (survey, program, count). healpix ids are unique."""
+        recs, h = [], 0
+        for survey, program, count in spec:
+            for _ in range(count):
+                recs.append({"coadd": f"/{survey}/{program}/{h}.fits",
+                             "survey": survey, "program": program, "healpix": h})
+                h += 1
+        return recs
+
+    def test_stratified_represents_every_category(self):
+        # Heavily imbalanced, like full DR1 (main >> sv1).
+        recs = self._cat_records([("main", "bright", 80), ("sv1", "dark", 20)])
+        train, val = split_records_by_healpix(recs, holdout_frac=0.1, seed=0)
+        val_cats = [(r["survey"], r["program"]) for r in val]
+        assert ("main", "bright") in val_cats   # both categories present in val
+        assert ("sv1", "dark") in val_cats
+        # ~holdout_frac of EACH group, not of the whole pooled at random
+        assert val_cats.count(("main", "bright")) == 8   # round(80*0.1)
+        assert val_cats.count(("sv1", "dark")) == 2       # round(20*0.1)
+
+    def test_not_sequential_by_category(self):
+        # Records ordered as one big block per category; a sequential holdout
+        # would put only the last category in val. Stratified must not.
+        recs = self._cat_records([("main", "bright", 50), ("sv1", "dark", 50)])
+        _, val = split_records_by_healpix(recs, holdout_frac=0.1, seed=0)
+        surveys = {r["survey"] for r in val}
+        assert surveys == {"main", "sv1"}  # draws from both blocks, not a tail
+
+    def test_falls_back_without_category_fields(self):
+        # Records with no survey/program → plain seeded random split, disjoint.
+        recs = self._records(100)
+        train, val = split_records_by_healpix(recs, holdout_frac=0.1, seed=0)
+        assert len(val) == 10 and len(train) == 90
+        assert {r["healpix"] for r in train}.isdisjoint({r["healpix"] for r in val})
+
+    def test_tiny_category_still_appears_in_val(self):
+        # A category with a handful of healpix must still land in val.
+        recs = self._cat_records([("main", "bright", 100), ("sv1", "bright", 3)])
+        _, val = split_records_by_healpix(recs, holdout_frac=0.05, seed=1)
+        assert ("sv1", "bright") in [(r["survey"], r["program"]) for r in val]
+
 
 # ---------------------------------------------------------------------------
 # Redshift-weight behavior — tests 13-14 (model-level)
