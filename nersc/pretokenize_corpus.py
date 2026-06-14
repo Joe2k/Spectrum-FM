@@ -29,13 +29,20 @@ Interactive single-GPU example:
 from __future__ import annotations
 
 import argparse
+import multiprocessing as mp
 import os
 import sys
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 from pathlib import Path
 
 import numpy as np
 import torch
 from astropy.io import fits
+
+# Per-spectrum cost is dominated by the FITS read + the pure-Python stitch,
+# not the GPU encode, so logs are flushed and progress is reported per-healpix.
+print = partial(print, flush=True)  # noqa: A001 — unbuffer under srun
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
@@ -58,6 +65,9 @@ def parse_args():
                         "zwarn!=0 / bad-fiberstatus / all-zero-flux before tokenizing")
     p.add_argument("--surveys", nargs="*", default=None)
     p.add_argument("--programs", nargs="*", default=None)
+    p.add_argument("--num-workers", type=int, default=8,
+                   help="CPU processes per rank for the FITS-read + stitch "
+                        "(the bottleneck; the GPU encode is cheap). 0 = serial.")
     p.add_argument("--overwrite", action="store_true",
                    help="re-tokenize shards that already exist")
     p.add_argument("--verify", action="store_true",
@@ -130,10 +140,56 @@ def shard_name(rec) -> str:
     return f"{rec['survey']}_{rec['program']}_{rec['healpix']}.npz"
 
 
-def write_shard(rec, model, device, args):
-    coadd = fits.open(rec["coadd"], memmap=True)
-    redrock = fits.open(rec["redrock"], memmap=True)
-    try:
+def _stitch_chunk(arg):
+    """CPU-only worker: stitch a slice of coadd rows. Imports no torch and
+    touches no GPU, so it is safe under a spawn ProcessPool while the parent
+    process holds the CUDA context. Re-opens the coadd (memmap) per call.
+    """
+    coadd_path, rows = arg
+    out = []
+    with fits.open(coadd_path, memmap=True) as coadd:
+        b_wave = coadd["B_WAVELENGTH"].data
+        r_wave = coadd["R_WAVELENGTH"].data
+        z_wave = coadd["Z_WAVELENGTH"].data
+        bf, rf, zf = coadd["B_FLUX"].data, coadd["R_FLUX"].data, coadd["Z_FLUX"].data
+        bi, ri, zi = coadd["B_IVAR"].data, coadd["R_IVAR"].data, coadd["Z_IVAR"].data
+        bm, rm, zm = coadd["B_MASK"].data, coadd["R_MASK"].data, coadd["Z_MASK"].data
+        for row in rows:
+            st = stitch_bands(
+                [b_wave, r_wave, z_wave],
+                [bf[row], rf[row], zf[row]],
+                [bi[row], ri[row], zi[row]],
+                [bm[row] != 0, rm[row] != 0, zm[row] != 0],
+            )
+            nz = float(np.abs(bf[row]).sum() + np.abs(rf[row]).sum()
+                       + np.abs(zf[row]).sum()) > 0.0
+            out.append((st["flux"].astype(np.float32), st["ivar"].astype(np.float32),
+                        st["wavelength"].astype(np.float32), bool(nz)))
+    return out
+
+
+def _stitch_all_rows(coadd_path, n, pool, num_workers):
+    """Stitch all n rows (the bottleneck), in order, parallel across `pool`.
+
+    np.array_split preserves order and pool.map preserves order, so the
+    concatenated result is in original row order.
+    """
+    rows = list(range(n))
+    if pool is None or num_workers <= 0 or n <= 1:
+        chunks = [_stitch_chunk((coadd_path, rows))]
+    else:
+        splits = [list(c) for c in np.array_split(rows, min(num_workers, n)) if len(c)]
+        chunks = list(pool.map(_stitch_chunk, [(coadd_path, c) for c in splits]))
+    flux_rows, ivar_rows, wave_rows, nonzero = [], [], [], []
+    for chunk in chunks:
+        for f, iv, wv, nz in chunk:
+            flux_rows.append(f); ivar_rows.append(iv); wave_rows.append(wv); nonzero.append(nz)
+    return flux_rows, ivar_rows, wave_rows, np.array(nonzero, dtype=np.int8)
+
+
+def write_shard(rec, model, device, args, pool=None):
+    with fits.open(rec["redrock"], memmap=True) as redrock, \
+            fits.open(rec["coadd"], memmap=True) as coadd:
         rs = redrock["REDSHIFTS"].data
         fm = coadd["FIBERMAP"].data
         z = rs["Z"].astype(np.float32)
@@ -141,47 +197,40 @@ def write_shard(rec, model, device, args):
         spectype = rs["SPECTYPE"].astype("<U8")
         targetid = fm["TARGETID"].astype(np.int64)
         fstat = fm["COADD_FIBERSTATUS"].astype(np.int32)
+    n = len(z)
 
-        flux_rows, ivar_rows, wave_rows, nonzero = [], [], [], []
-        for f, iv, wv, nz in _stitched_rows(coadd, redrock):
-            flux_rows.append(f.astype(np.float32))
-            ivar_rows.append(iv.astype(np.float32))
-            wave_rows.append(wv.astype(np.float32))
-            nonzero.append(nz)
-        nonzero = np.array(nonzero, dtype=np.int8)
-        row = np.arange(len(flux_rows), dtype=np.int32)
+    flux_rows, ivar_rows, wave_rows, nonzero = _stitch_all_rows(
+        str(rec["coadd"]), n, pool, args.num_workers)
+    row = np.arange(n, dtype=np.int32)
 
-        keep = np.ones(len(row), dtype=bool)
-        if args.quality == "strict":
-            keep = (zwarn == 0) & (fstat == 0) & nonzero.astype(bool)
+    keep = np.ones(n, dtype=bool)
+    if args.quality == "strict":
+        keep = (zwarn == 0) & (fstat == 0) & nonzero.astype(bool)
 
-        idx_keep = np.nonzero(keep)[0]
-        if idx_keep.size == 0:
-            return 0  # nothing to write for this healpix
-        flux_arr = np.stack([flux_rows[i] for i in idx_keep])
-        ivar_arr = np.stack([ivar_rows[i] for i in idx_keep])
-        wave_arr = np.stack([wave_rows[i] for i in idx_keep])
+    idx_keep = np.nonzero(keep)[0]
+    if idx_keep.size == 0:
+        return 0  # nothing to write for this healpix
+    flux_arr = np.stack([flux_rows[i] for i in idx_keep])
+    ivar_arr = np.stack([ivar_rows[i] for i in idx_keep])
+    wave_arr = np.stack([wave_rows[i] for i in idx_keep])
 
-        indices, denorm = _encode_rows(
-            model, flux_arr, ivar_arr, wave_arr, device, args.amp, args.batch_size)
+    indices, denorm = _encode_rows(
+        model, flux_arr, ivar_arr, wave_arr, device, args.amp, args.batch_size)
 
-        shard = args.out / shard_name(rec)
-        np.savez_compressed(
-            shard,
-            indices=indices,
-            z=z[idx_keep], denorm=denorm,
-            zwarn=zwarn[idx_keep], fiberstatus=fstat[idx_keep],
-            nonzero_flux=nonzero[idx_keep],
-            spectype=spectype[idx_keep], targetid=targetid[idx_keep],
-            row=row[idx_keep],
-            survey=np.array(rec["survey"]), program=np.array(rec["program"]),
-            healpix=np.array(int(rec["healpix"])),
-            coadd=np.array(str(rec["coadd"])), redrock=np.array(str(rec["redrock"])),
-        )
-        return int(indices.shape[0])
-    finally:
-        coadd.close()
-        redrock.close()
+    shard = args.out / shard_name(rec)
+    np.savez_compressed(
+        shard,
+        indices=indices,
+        z=z[idx_keep], denorm=denorm,
+        zwarn=zwarn[idx_keep], fiberstatus=fstat[idx_keep],
+        nonzero_flux=nonzero[idx_keep],
+        spectype=spectype[idx_keep], targetid=targetid[idx_keep],
+        row=row[idx_keep],
+        survey=np.array(rec["survey"]), program=np.array(rec["program"]),
+        healpix=np.array(int(rec["healpix"])),
+        coadd=np.array(str(rec["coadd"])), redrock=np.array(str(rec["redrock"])),
+    )
+    return int(indices.shape[0])
 
 
 def verify(model, device, args):
@@ -243,18 +292,36 @@ def main() -> int:
     mine = records[rank::world]
     print(f"[setup] rank {rank}/{world}: {len(mine)} of {len(records)} healpix")
 
+    # CPU pool for the FITS-read + stitch bottleneck (spawn so the parent's
+    # CUDA context is never forked into the workers).
+    pool = None
+    if args.num_workers > 0:
+        pool = ProcessPoolExecutor(max_workers=args.num_workers,
+                                   mp_context=mp.get_context("spawn"))
+    print(f"[rank {rank}] starting: {args.num_workers} stitch workers, "
+          f"batch {args.batch_size}", flush=True)
+
+    import time
+    t0 = time.time()
     n_done = n_spec = n_skip = 0
-    for i, rec in enumerate(mine):
-        shard = args.out / shard_name(rec)
-        if shard.exists() and not args.overwrite:
-            n_skip += 1
-            continue
-        n = write_shard(rec, model, device, args)
-        n_done += 1
-        n_spec += n
-        if (i + 1) % 50 == 0 or i + 1 == len(mine):
-            print(f"[rank {rank}] {i + 1}/{len(mine)} healpix · "
-                  f"{n_done} written ({n_spec} spectra) · {n_skip} skipped")
+    try:
+        for i, rec in enumerate(mine):
+            shard = args.out / shard_name(rec)
+            if shard.exists() and not args.overwrite:
+                n_skip += 1
+                continue
+            n = write_shard(rec, model, device, args, pool=pool)
+            n_done += 1
+            n_spec += n
+            # Log early and often so progress is visible under srun.
+            if n_done <= 3 or (i + 1) % 20 == 0 or i + 1 == len(mine):
+                rate = n_spec / max(time.time() - t0, 1e-6)
+                print(f"[rank {rank}] {i + 1}/{len(mine)} healpix · "
+                      f"{n_done} written ({n_spec} spectra, {rate:.0f}/s) · "
+                      f"{n_skip} skipped")
+    finally:
+        if pool is not None:
+            pool.shutdown()
     print(f"[rank {rank}] done: {n_done} shards / {n_spec} spectra written, "
           f"{n_skip} already present")
     return 0

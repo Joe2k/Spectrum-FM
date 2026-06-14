@@ -2185,3 +2185,26 @@ per-spectype val metrics (X4) trustworthy. Records lacking the keys fall back to
 the prior plain random split (back-compatible). Still healpix-level (no
 same-pointing leakage). Tests: stratified representation, imbalanced corpus,
 not-sequential-by-category, tiny-category coverage, fallback. 205 passed.
+
+
+---
+
+## 2026-06-13 (cont.): pretokenize_corpus throughput + logging fix
+
+First full-scale run symptom: 4 GPUs at 0% util, no logs for minutes. Not a
+hang — per-spectrum cost is dominated by the FITS read + the pure-Python
+`stitch_bands` loop, done single-threaded per rank, so the GPU starved while one
+CPU core ground through stitching; and prints were buffered under srun. Fixes:
+- **Parallel stitch**: `--num-workers` (default 8) CPU process pool per rank
+  (spawn context so the parent's CUDA context is never forked), splitting each
+  healpix's rows across workers. `np.array_split` + `pool.map` preserve order →
+  identical output; `--num-workers 0` = serial fallback; `--verify` still proves
+  byte-equality. Makes the 4-GPU srun worthwhile (~Nx per rank).
+- **Streaming logs**: flushed stdout, a per-rank startup line, and progress every
+  healpix for the first few then every 20 with a spectra/s rate.
+
+Also confirmed for full DR1: no need to stage raw FITS to scratch — the manifest
+points at the canonical CFS DR1 (`build_dr1_index --root` default
+`/global/cfs/cdirs/desi/public/dr1`), read once. Only the ~5 GB token cache lives
+on scratch (the working set training reads); copy it to CFS after build since
+scratch is purged.
