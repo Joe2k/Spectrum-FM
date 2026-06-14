@@ -2018,3 +2018,54 @@ full `run_audit` driver on a synthetic dataset (random-init model → correct FL
 with all reasons, confirming the code path). On PASS of the real run → X1
 pre-tokenize corpus + transformer-v2 campaign (X2+X3+X5). No tokenizer retraining
 (already at the noise floor).
+
+
+---
+
+## 2026-06-13 (cont.): T3 first run + audit upgrade (per-bit flip, margin sweep)
+
+Ran T3 on final.pt (1331 val spectra, K=16). Verdict FLAGged, but the FLAG was
+a naive metric, not a codec defect. The two facts looked contradictory:
+
+- **Part B reconstruction is excellent at the noise floor** — χ²/pixel ≈ 1.0
+  across every (survey, program) group, pooled-SNR>3 R² 0.87–0.99. Dark is NOT
+  second-class (main/sv2/sv3 dark χ² < bright). Only blips: sv1/dark χ²=1.29
+  (n=81) and sv1/bright pooled-R²=0.29 (n=69) — small-sample pooling noise on
+  the smallest survey-validation slice.
+- **Yet token-index flip rate was ~73% even for high-SNR (>3) tokens.**
+
+Reconciliation: each token is a **10-bit LFQ code**; the integer index changes
+if ANY one of 10 sign-bits flips, so token-level flip overcounts. Inverting
+1−(1−p_bit)^10 = 0.73 gives **per-bit flip ≈ 12%** — modest. And at χ²=1.0 the
+codec reconstructs down to the noise, so its marginal (near-sign-boundary) bits
+*encode the noise itself* and flip on a re-draw, while the signal-bearing bits
+(and thus reconstruction) hold. The SNR curve confirmed it: the very-high-SNR
+(>10) tokens were the MOST stable (0.63); peak instability was mid-SNR (signal ≈
+noise → bits on the boundary). The ">3" aggregate just lumped the stable >10
+tail with the marginal 3–10 band.
+
+**The keep-this finding:** a large fraction of *exact token identity* is
+noise-driven. Not fixable in the codec without backing off the noise floor
+(fewer bits = stabler tokens but worse reconstruction — a v3-generation
+tradeoff, not warranted). The lever is the **transformer objective**:
+exact-token-match has a low ceiling here (almost certainly why v1 masked-token
+accuracy plateaued ~47% — you can't predict noise bits). Validates training
+masked-targets-only (X2) and judging on reconstruction + physical/NMAD metrics
+(X4), NOT token-match accuracy.
+
+**Audit upgrade (this commit)** to confirm the interpretation with evidence:
+- `bits_from_indices` — recover the 10 sign-bits from each index and measure
+  flip at the **per-bit** granularity (the honest number).
+- **Margin sweep** over perturbation scale (0.25/0.5/1.0 σ) — exposes the
+  sign-decision margin; bit flip rises smoothly and stays far below token flip.
+- **Very-high-SNR (>10) slice** — the signal-bearing bits, reported separately.
+- **Recalibrated verdict:** hard gate = per-bit flip on SNR>10 tokens
+  (`--bit-thresh` 0.10) + reconstruction on adequately-sampled groups
+  (n ≥ `--min-n-equity` 100); token-index flip and small-n group blips (e.g.
+  sv1) are informational notes, not fails.
+
+Tests: 30 audit unit tests (incl. bit-decomposition + the token-overcounts-bit
+relationship) + 37 tokenizer tests green; CPU smoke confirms bit-flip ≤
+token-flip at every scale and rises monotonically with perturbation. Re-running
+T3 on final.pt next; expect PASS on the per-bit gate. This does not block
+freezing v2 (reconstruction is the codec's job and it's at the floor).

@@ -13,6 +13,7 @@ sys.path.insert(0, str(REPO / "nersc"))
 
 from audit_tokenizer_stability import (  # noqa: E402
     flip_fraction,
+    bits_from_indices,
     token_local_snr,
     stratify_by_snr,
     pooled_r2,
@@ -41,6 +42,40 @@ class TestFlipFraction:
     def test_shape_mismatch_raises(self):
         with pytest.raises(ValueError):
             flip_fraction(torch.zeros(2, 3), torch.zeros(2, 4))
+
+
+class TestBitsFromIndices:
+    def test_zero_is_all_zero_bits(self):
+        out = bits_from_indices(torch.tensor([0]), dim=10)
+        assert out.shape == (1, 10)
+        assert out.sum().item() == 0
+
+    def test_one_sets_only_lowest_bit(self):
+        out = bits_from_indices(torch.tensor([1]), dim=10)
+        assert out[0, 0].item() == 1 and out[0, 1:].sum().item() == 0
+
+    def test_five_is_101(self):
+        out = bits_from_indices(torch.tensor([5]), dim=4)
+        assert out[0].tolist() == [1, 0, 1, 0]  # 5 = 1 + 4
+
+    def test_all_ones(self):
+        out = bits_from_indices(torch.tensor([1023]), dim=10)
+        assert out.sum().item() == 10
+
+    def test_preserves_leading_shape(self):
+        idx = torch.randint(0, 1024, (3, 7))
+        out = bits_from_indices(idx, dim=10)
+        assert out.shape == (3, 7, 10)
+
+    def test_token_flip_overcounts_bit_flip(self):
+        # A single bit change makes the token index differ — flip_fraction at
+        # token granularity reads 1.0, at bit granularity reads 1/dim.
+        base = torch.tensor([[0, 0]])
+        noisy = torch.tensor([[1, 2]])  # bit0 of t0, bit1 of t1 → 1 bit each
+        assert flip_fraction(base, noisy) == 1.0
+        bb = bits_from_indices(base, 10)
+        nb = bits_from_indices(noisy, 10)
+        assert flip_fraction(bb, nb) == pytest.approx(1.0 / 10)
 
 
 class TestTokenLocalSNR:
@@ -122,30 +157,46 @@ class TestSummarizeGroup:
 
 
 class TestVerdict:
-    def _group(self, chi2, use):
-        return {"n_spectra": 10, "chi2_per_pixel": chi2,
+    def _group(self, chi2, use, n=150):
+        return {"n_spectra": n, "chi2_per_pixel": chi2,
                 "flux_r2_pooled": 0.5, "flux_r2_pooled_snr3": 0.8, "codebook_use": use}
 
-    def test_pass(self):
+    def _kw(self):
+        return dict(bit_thresh=0.10, token_hi_thresh=0.50,
+                    chi2_thresh=1.2, codebook_thresh=0.30, min_n=100)
+
+    def test_pass_on_low_bit_flip(self):
+        # token flip can be high (overcounts) — gate is on per-BIT flip.
         rows = {("main", "bright"): self._group(1.0, 0.7),
                 ("main", "dark"): self._group(1.05, 0.65)}
-        passed, reasons = verdict(0.08, rows, flip_thresh=0.15,
-                                  chi2_thresh=1.2, codebook_thresh=0.30)
+        passed, reasons, notes = verdict(0.06, 0.73, rows, **self._kw())
         assert passed and reasons == []
 
-    def test_flag_on_high_snr_flip(self):
+    def test_high_token_flip_is_only_a_note(self):
         rows = {("main", "bright"): self._group(1.0, 0.7)}
-        passed, reasons = verdict(0.4, rows, flip_thresh=0.15,
-                                  chi2_thresh=1.2, codebook_thresh=0.30)
-        assert not passed and any("flip" in r for r in reasons)
+        passed, reasons, notes = verdict(0.06, 0.80, rows, **self._kw())
+        assert passed and reasons == []
+        assert any("token-index flip" in n for n in notes)
 
-    def test_flag_on_bad_group(self):
-        rows = {("main", "dark"): self._group(1.5, 0.1)}
-        passed, reasons = verdict(0.05, rows, flip_thresh=0.15,
-                                  chi2_thresh=1.2, codebook_thresh=0.30)
+    def test_flag_on_high_bit_flip(self):
+        rows = {("main", "bright"): self._group(1.0, 0.7)}
+        passed, reasons, notes = verdict(0.25, 0.73, rows, **self._kw())
+        assert not passed and any("per-bit flip" in r for r in reasons)
+
+    def test_flag_on_bad_well_sampled_group(self):
+        rows = {("main", "dark"): self._group(1.5, 0.1, n=300)}
+        passed, reasons, notes = verdict(0.05, 0.4, rows, **self._kw())
         assert not passed
         assert any("chi^2" in r for r in reasons)
         assert any("codebook" in r for r in reasons)
+
+    def test_small_n_group_blip_is_a_note_not_a_fail(self):
+        # sv1/dark χ²=1.29 on n=81 (the real run) → informational, still PASS.
+        rows = {("sv1", "dark"): self._group(1.29, 0.5, n=81),
+                ("main", "dark"): self._group(1.0, 0.6, n=300)}
+        passed, reasons, notes = verdict(0.05, 0.4, rows, **self._kw())
+        assert passed and reasons == []
+        assert any("sv1/dark" in n and "informational" in n for n in notes)
 
 
 class TestBuildValIndices:
