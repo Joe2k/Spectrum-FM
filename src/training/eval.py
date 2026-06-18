@@ -46,6 +46,7 @@ def evaluate(
     redshift_mask_ratio: float = 0.0,
     redshift_soft_sigma: float = 0.0,
     max_batches: int = 50,
+    amp_dtype: torch.dtype = torch.float16,
 ) -> Dict[str, float]:
     """Teacher-forced eval. Returns a dict of averaged metrics over up to
     `max_batches` batches from `loader`.
@@ -71,7 +72,7 @@ def evaluate(
             encoder_mask_ratio=encoder_mask_ratio,
             redshift_mask_ratio=redshift_mask_ratio,
         )
-        with torch.amp.autocast("cuda", enabled=amp):
+        with torch.amp.autocast("cuda", enabled=amp, dtype=amp_dtype):
             logits, loss = model(enc, dec, targets=tgt, redshift_weight=redshift_weight,
                                  redshift_soft_sigma=redshift_soft_sigma)
         losses += float(loss.item())

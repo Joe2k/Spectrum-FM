@@ -2496,3 +2496,61 @@ unrelated wandb-offline failure). Correct resume target is now:
 ```bash
 --resume $SCRATCH/deepsrch/checkpoints/approach_a_v2cache_x2x3_ddp4/last.pt
 ```
+
+## 2026-06-18: X2+X3 first full run (`dcsvevx3`) diverged to NaN — root cause + hardening
+
+First full X2+X3 run on the cache crashed to `train/loss = NaN` at **step ~10,500**.
+Post-mortem from W&B: `val/loss` (= `10·loss_redshift + loss_spectrum`) rose
+76 → 91 because **redshift loss was *rising*** (7.2 → 8.67; random CE at 4096 bins
+= ln 4096 = 8.32, so the head was at/above random and drifting) while
+**spectrum_acc decayed 0.184 → 0.149**. Both are the heavy-redshift-weight
+pathology, then a loss spike with no guard tipped it to NaN — a replay of the
+v10 failure (2026-06-08 entry).
+
+**Three root causes, all now fixed:**
+
+1. **Wrong redshift loss weight.** I launched with `--redshift-loss-weight 10`
+   (copied from the stale DDP-wrapper default). v9's validated value is **1.0**
+   (breakthrough entry, run `8m9rkz37`); 10 puts ~95% of the loss mass on the z
+   token (50 → 98%, the v8 copy-artifact regime), starving spectrum. Fixed the
+   **default everywhere to 1.0**: argparse (`train_transformer.py`, was a stale
+   50) and `train_transformer_ddp.slurm` (`REDSHIFT_LOSS_WEIGHT`, was 10).
+
+2. **fp16 autocast (no bf16 option).** The loop ran default fp16; fp16
+   `log_softmax` over the 5128-wide vocab is the overflow→NaN class the tokenizer
+   campaign already killed with bf16. Added `--amp-dtype {bf16,fp16}` **default
+   bf16** (fp32 dynamic range, no overflow); GradScaler auto-disabled for bf16,
+   and a bf16 resume skips loading old fp16 scaler state. Eval autocast threads
+   the same dtype (`evaluate(..., amp_dtype=)`).
+
+3. **No finite-loss skip-guard.** The loop did forward→backward→step with no
+   `isfinite` check, so one bad batch poisoned the weights permanently (the log
+   prescribed this guard for v10 but it was never added). Added a **DDP-safe**
+   guard: backward runs on every rank (keeps the grad allreduce in lockstep),
+   then `dist.all_reduce(MIN)` on the finiteness flag makes all ranks skip the
+   same steps; poisoned grads are zeroed, the step is skipped and counted, and
+   100 consecutive skips abort (weights unrecoverable → resume from healthy
+   `last.pt`). The fp32 soft-CE from the X3 commit stays (defense in depth).
+
+Tests: 114 passed (1 pre-existing unrelated wandb-offline failure); guard +
+dtype logic unit-checked (NaN/inf → SKIP, finite → step; bf16→no scaler).
+
+**Action:** killed `dcsvevx3`; relaunch at the corrected defaults (weight 1.0,
+bf16, guard on). Interactive DDP needs `srun --gpu-bind=none` (a bare `srun` in
+`salloc` doesn't bind one GPU per task → all ranks land on cuda:0 → NCCL
+`invalid device ordinal`):
+
+```bash
+srun --gpu-bind=none python nersc/train_transformer.py \
+    --manifest $SCRATCH/manifests/dr1_v2_full.jsonl \
+    --tokenized-dir $SCRATCH/dr1_tokenized_v2 \
+    --approach a --masked-targets-only \
+    --mask-ratio-min 0.15 --mask-ratio-max 0.75 \
+    --z-bins 4096 --z-fit-files 800 --redshift-soft-sigma 24 \
+    --redshift-loss-weight 1.0 --encoder-mask-ratio 0.5 \
+    --amp --amp-dtype bf16 \
+    --steps 100000 --batch-size 32 --lr 8e-4 \
+    --num-workers 12 --d-model 768 --n-encoder-layers 6 --n-decoder-layers 6 --n-heads 12 \
+    --healpix-holdout-frac 0.05 --ar-eval-batches 8 \
+    --run-name approach_a_v2cache_x2x3_ddp4 --wandb-project redshifty
+```

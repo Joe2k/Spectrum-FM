@@ -124,8 +124,18 @@ def parse_args():
     p.add_argument("--warmup", type=int, default=1000)
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--amp", action="store_true")
-    p.add_argument("--redshift-loss-weight", type=float, default=50.0,
-                   help="Multiplier on position-0 (redshift) loss term.")
+    p.add_argument("--amp-dtype", choices=["bf16", "fp16"], default="bf16",
+                   help="Autocast dtype when --amp is set. bf16 (default) has "
+                        "fp32 dynamic range so it cannot overflow to inf/NaN the "
+                        "way fp16 log_softmax over a large vocab does (the v10 "
+                        "NaN class); GradScaler is auto-disabled for bf16. fp16 "
+                        "retained for back-compat (re-enables GradScaler).")
+    p.add_argument("--redshift-loss-weight", type=float, default=1.0,
+                   help="Multiplier on the position-0 (redshift) loss term. "
+                        "1.0 is the validated v9 value: it balances redshift "
+                        "against the 272 spectrum tokens. Higher (10, 50) puts "
+                        ">=95%% of the loss mass on z, which starves spectrum and "
+                        "reproduces the v8 stuck/copy-artifact regime.")
     p.add_argument("--encoder-mask-ratio", type=float, default=0.15,
                    help="Fraction of encoder spectrum positions to replace "
                         "with [MASK]. BERT-style. 0.0 disables; 0.15 is "
@@ -272,7 +282,8 @@ def main():
           f"steps={args.steps} mask_ratio={mask_desc} "
           f"masked_targets_only={args.masked_targets_only} "
           f"redshift_mask_ratio={args.redshift_mask_ratio} "
-          f"redshift_weight={args.redshift_loss_weight}")
+          f"redshift_weight={args.redshift_loss_weight} "
+          f"amp={args.amp}/{args.amp_dtype}")
     run_dir = args.scratch_out / "checkpoints" / args.run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = run_dir / "metrics.jsonl"
@@ -396,7 +407,12 @@ def main():
     print(f"[model] params={n_params:,} (~{n_params/1e6:.1f}M)")
 
     optim = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
+    # bf16 has fp32 dynamic range and needs no loss scaling; only fp16 uses the
+    # GradScaler. Disabling it for bf16 also means old fp16 scaler state is not
+    # loaded on a bf16 resume (see the resume block).
+    amp_dtype = torch.bfloat16 if args.amp_dtype == "bf16" else torch.float16
+    use_scaler = args.amp and args.amp_dtype == "fp16"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
 
     # Optional resume: restore model/optim/scaler/step/best_val from a
     # full-state checkpoint. Every rank loads the same file, keeping DDP
@@ -415,7 +431,7 @@ def main():
         (model.module if is_distributed else model).load_state_dict(rckpt["model"])
         if "optim" in rckpt:
             optim.load_state_dict(rckpt["optim"])
-        if "scaler" in rckpt:
+        if "scaler" in rckpt and use_scaler:
             scaler.load_state_dict(rckpt["scaler"])
         resume_step = int(rckpt.get("step", 0))
         resume_best = float(rckpt.get("val_loss", float("inf")))
@@ -457,6 +473,9 @@ def main():
     step = resume_step
     epoch = 0
     best_val = resume_best
+    nonfinite_skips = 0       # total optimizer steps skipped on a non-finite loss
+    consecutive_skips = 0     # run of back-to-back skips (poison detector)
+    MAX_CONSEC_SKIPS = 100    # abort if the weights are unrecoverably NaN
     t0 = time.time()
     if train_sampler is not None:
         train_sampler.set_epoch(epoch)
@@ -500,11 +519,35 @@ def main():
         )
 
         optim.zero_grad(set_to_none=True)
-        with torch.amp.autocast("cuda", enabled=args.amp):
+        with torch.amp.autocast("cuda", enabled=args.amp, dtype=amp_dtype):
             logits, loss = model(enc, dec, targets=tgt,
                                  redshift_weight=args.redshift_loss_weight,
                                  redshift_soft_sigma=args.redshift_soft_sigma)
+        # Backward is called on every rank (keeps DDP's grad allreduce in
+        # lockstep), then all ranks collectively decide whether the step is
+        # safe to take. A single non-finite loss (overflow / pathological
+        # batch) would otherwise apply NaN grads and poison the weights for the
+        # rest of the run — exactly the v10 failure. The reduce makes the skip
+        # decision identical on every rank so no replica desyncs.
         scaler.scale(loss).backward()
+        finite = torch.isfinite(loss).all().to(torch.float32)
+        if is_distributed:
+            dist.all_reduce(finite, op=dist.ReduceOp.MIN)
+        if finite.item() < 1.0:
+            optim.zero_grad(set_to_none=True)   # drop the poisoned grads
+            nonfinite_skips += 1
+            consecutive_skips += 1
+            if rank == 0:
+                print(f"  WARN: non-finite loss at step {step}; skipped update "
+                      f"(skip #{nonfinite_skips}, {consecutive_skips} in a row)")
+            if consecutive_skips >= MAX_CONSEC_SKIPS:
+                raise RuntimeError(
+                    f"{consecutive_skips} consecutive non-finite losses — the "
+                    f"weights are poisoned; aborting. Resume from the last "
+                    f"healthy last.pt and/or lower --lr.")
+            step += 1
+            continue
+        consecutive_skips = 0
         if args.grad_clip > 0:
             scaler.unscale_(optim)
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
@@ -564,6 +607,7 @@ def main():
                 encoder_mask_ratio=args.encoder_mask_ratio,
                 redshift_mask_ratio=1.0,
                 redshift_soft_sigma=args.redshift_soft_sigma,
+                amp_dtype=amp_dtype,
             )
             model.train()
             print(f"[val   {step:6d}] " + " ".join(f"{k}={v[k]:.4f}" for k in v))

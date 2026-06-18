@@ -33,6 +33,8 @@
 #   Z_BINS         redshift bins       (default: 256; X3 = 4096)
 #   Z_FIT_FILES    shards to fit z-tok (default: 200; raise for 4096 bins)
 #   REDSHIFT_SOFT_SIGMA  soft-label std in bins (default: 0 = hard CE)
+#   REDSHIFT_LOSS_WEIGHT z-loss multiplier (default: 1.0 = validated v9)
+#   AMP_DTYPE      bf16 (default) or fp16 autocast
 #   MASKED_TARGETS_ONLY  1 = supervise only encoder-hidden positions (X2)
 #   MASK_RATIO_MIN/MAX   per-batch U[min,max] encoder mask ratio (X2)
 #
@@ -73,7 +75,8 @@ NUM_WORKERS="${NUM_WORKERS:-12}"
 D_MODEL="${D_MODEL:-768}"
 N_LAYERS="${N_LAYERS:-6}"
 N_HEADS="${N_HEADS:-12}"
-REDSHIFT_LOSS_WEIGHT="${REDSHIFT_LOSS_WEIGHT:-10.0}"
+REDSHIFT_LOSS_WEIGHT="${REDSHIFT_LOSS_WEIGHT:-1.0}"
+AMP_DTYPE="${AMP_DTYPE:-bf16}"
 ENCODER_MASK_RATIO="${ENCODER_MASK_RATIO:-0.50}"
 HEALPIX_HOLDOUT_FRAC="${HEALPIX_HOLDOUT_FRAC:-0.05}"
 AR_EVAL_BATCHES="${AR_EVAL_BATCHES:-8}"
@@ -150,7 +153,7 @@ if awk "BEGIN{exit !($REDSHIFT_SOFT_SIGMA > 0)}"; then
     Z_ARGS+=(--redshift-soft-sigma "$REDSHIFT_SOFT_SIGMA")
 fi
 
-echo "[train-ddp] z_bins=$Z_BINS soft_sigma=$REDSHIFT_SOFT_SIGMA masked_targets_only=${MASKED_TARGETS_ONLY:-0} mask_ratio=${MASK_RATIO_MIN:-fixed}..${MASK_RATIO_MAX:-}"
+echo "[train-ddp] z_bins=$Z_BINS soft_sigma=$REDSHIFT_SOFT_SIGMA z_weight=$REDSHIFT_LOSS_WEIGHT amp_dtype=$AMP_DTYPE masked_targets_only=${MASKED_TARGETS_ONLY:-0} mask_ratio=${MASK_RATIO_MIN:-fixed}..${MASK_RATIO_MAX:-}"
 
 srun python "$REPO/nersc/train_transformer.py" \
     --manifest "$MANIFEST" \
@@ -176,6 +179,6 @@ srun python "$REPO/nersc/train_transformer.py" \
     --z-bins "$Z_BINS" \
     --wandb-mode "$WANDB_MODE_ARG" \
     --wandb-project "$WANDB_PROJECT" \
-    --amp
+    --amp --amp-dtype "$AMP_DTYPE"
 
 echo "[train-ddp] done; best/final mirrored to $CFS_OUT"
