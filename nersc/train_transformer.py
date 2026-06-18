@@ -646,12 +646,43 @@ def main():
                                  "val_ar/redshift_acc_zgiven": ar_zgiven["ar_redshift_acc"]}, step=step)
 
         if rank == 0 and step > 0 and step % args.save_every == 0:
+            msd = model.module.state_dict() if is_distributed else model.state_dict()
+            # Archival model-only snapshot (handy for picking a specific step,
+            # but NOT a resume point — no optimizer state).
             p = run_dir / f"step_{step:08d}.pt"
+            torch.save({"step": step, "model": msd}, p)
+            # Rolling FULL-STATE checkpoint for lossless resume. Unlike best.pt
+            # (which only advances when val improves) this is written every
+            # save_every regardless, so a wallclock kill late in training
+            # resumes from the true latest step with Adam moments + scaler +
+            # step + wandb id intact. Same dict shape as best.pt.
+            last = run_dir / "last.pt"
             torch.save({
                 "step": step,
-                "model": model.module.state_dict() if is_distributed else model.state_dict(),
-            }, p)
-            print(f"  ckpt -> {p}")
+                "model": msd,
+                "optim": optim.state_dict(),
+                "scaler": scaler.state_dict(),
+                "val_loss": best_val,
+                "z_tokenizer": {
+                    "sorted_z": z_tok._sorted_z.cpu(),
+                    "n_levels": z_tok.n_levels,
+                    "gaussian_range": z_tok.gaussian_range,
+                },
+                "tokenizer_ckpt_path": str(args.tokenizer_ckpt),
+                "approach": args.approach,
+                "encoder_mask_ratio": args.encoder_mask_ratio,
+                "redshift_mask_ratio": args.redshift_mask_ratio,
+                "redshift_soft_sigma": args.redshift_soft_sigma,
+                "wandb_run_id": wandb_id_to_save,
+            }, last)
+            print(f"  ckpt -> {p}  (+ rolling last.pt @ step {step})")
+            if args.cfs_out is not None:
+                try:
+                    args.cfs_out.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(last, args.cfs_out / "last.pt")
+                except OSError as e:
+                    print(f"  WARN: cfs_out last.pt mirror failed ({e}); "
+                          f"SCRATCH last.pt is safe at {last}")
 
         step += 1
 

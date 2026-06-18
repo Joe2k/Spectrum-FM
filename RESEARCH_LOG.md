@@ -2454,3 +2454,45 @@ TOKENIZED_DIR=$SCRATCH/dr1_tokenized_v2 \
     RUN_NAME=approach_a_v2cache_x2x3_ddp4 \
     sbatch nersc/train_transformer_ddp.slurm
 ```
+
+**X3 smoke verified on NERSC (run `weh54f9g`).** 4096 bins + fp32 soft-CE ran
+clean: `z_loss` finite throughout (8.63→7.98, no NaN/inf), `spec_acc` and
+`masked_spec_acc` climbed together to ~0.10 (X2 supervising only hidden
+positions), `final.pt` saved. `z_acc=0` is expected — bin-exact match at 4096
+bins in 100 steps on a 5M smoke model is near-impossible; the soft label is the
+gradient, and z is judged on NMAD (X4), not bin-exact accuracy. The z-fit
+warning is again the smoke-only 5-shard artifact.
+
+## 2026-06-18: rolling full-state last.pt for lossless transformer resume
+
+Auditing the `--resume` wiring for the interactive 4h-boundary workflow surfaced
+a gap: **`train_transformer.py` never wrote a `last.pt`** (the `last.pt` in older
+log entries is `pretrain_tokenizer.py`'s, a different script). Its three outputs
+were `best.pt` (full optim+scaler+step+wandb_id, but only written when val
+improves), `step_NNNNNNNN.pt` (every `save_every`, but **model-only** — no Adam
+moments), and `final.pt` (end-of-run, no optim). So a wallclock kill late in
+training — once val has plateaued and `best.pt` has stopped advancing — could
+only resume from a stale `best.pt`, and the more recent `step_*.pt` would
+silently cold-start the optimizer. My earlier "resume from last.pt" instruction
+was wrong for the transformer.
+
+Fix (`train_transformer.py`, `save_every` block): write a **rolling full-state
+`last.pt`** every `save_every` steps, same dict shape as `best.pt` (model +
+optim + scaler + step + val_loss + z_tokenizer + meta + wandb_run_id), mirrored
+to `cfs_out`. The archival model-only `step_NNNNNNNN.pt` stays (commented as NOT
+a resume point); the model state_dict is captured once and shared between the
+two writes. Now a kill resumes from the true latest checkpointed step with the
+optimizer state intact.
+
+`--resume` itself was already correct: it loads optim/scaler only if present
+(`:416,419`), restores `step`/`best_val`/`wandb_run_id` (so W&B continues with no
+`--wandb-run-id` flag), recomputes lr from `step` each iteration (`:479`, not
+stored), and the variable mask-ratio is seeded by `seed+step` (`:486`) so the
+schedule is deterministic across resume. The `--z-bins` guard (`:409`) errors if
+the resume z-bins disagree with the checkpoint, so re-pass `--z-bins 4096` (and
+the X2/X3 + model-dim flags) on resume. Tests: 91 passed (1 pre-existing
+unrelated wandb-offline failure). Correct resume target is now:
+
+```bash
+--resume $SCRATCH/deepsrch/checkpoints/approach_a_v2cache_x2x3_ddp4/last.pt
+```
