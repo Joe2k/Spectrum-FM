@@ -109,8 +109,13 @@ class DR1IndexedDataset(Dataset):
             except Exception:
                 pass
         rec = self.records[rec_idx]
-        coadd = fits.open(rec["coadd"], memmap=True)
-        redrock = fits.open(rec["redrock"], memmap=True)
+        # memmap=False: DESI coadd *_MASK image HDUs carry BZERO/BSCALE, which
+        # astropy refuses to memory-map ("Cannot load a memory-mapped image:
+        # BZERO/BSCALE/BLANK ... Set memmap=False"). Since cache_size is tiny and
+        # __getitem__ reads most rows of a healpix anyway, a single bulk read per
+        # file is also faster than many memmapped slice seeks.
+        coadd = fits.open(rec["coadd"], memmap=False)
+        redrock = fits.open(rec["redrock"], memmap=False)
         self._hdul_cache[rec_idx] = (coadd, redrock)
         self._hdul_order.append(rec_idx)
         return coadd, redrock

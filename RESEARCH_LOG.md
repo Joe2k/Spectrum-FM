@@ -2337,3 +2337,14 @@ The constant was a documentation/export value — its only library consumer
 Full suite green (210 passed; the lone failure is the pre-existing, unrelated
 `test_missing_api_key_falls_back_to_offline`). The notebook's derive-from-tokenizer
 override now agrees with the corrected constant.
+
+**Smoke / data-loader fix:** `nersc/dr1_dataset.py` opened coadd/redrock with
+`memmap=True`, which astropy refuses for the DESI `*_MASK` image HDUs (they carry
+BZERO/BSCALE → "Cannot load a memory-mapped image ... Set memmap=False"). This
+crashed `train_transformer.py --smoke` in FITS I/O before the first training step
+(unrelated to X2). Switched both opens to `memmap=False`; with `cache_size=1` and
+the dataset reading most rows of a healpix per file, a single bulk read is also
+faster than many memmapped slice seeks. Verified by running the smoke end-to-end
+(both default and X2-on: `--masked-targets-only --mask-ratio-min 0.3
+--mask-ratio-max 0.7`) — 100 steps, loss decreasing, `final.pt` saved — and
+`tests/test_dataset.py` stays green (10 passed).
