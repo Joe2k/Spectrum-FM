@@ -2366,3 +2366,91 @@ Heads-up (not yet fixed): running `setup_release_checkpoints.py` on NERSC regene
 `MANIFEST.json` with only `spectrum_tokenizer_v2` under `models` (v1/v9 artifacts weren't
 present there), so the transformer notebook's v1/v9 lookups would break until MANIFEST is
 regenerated on a machine that has all three artifacts.
+
+---
+
+## 2026-06-18: X1 pre-tokenization complete — full-DR1 cache + manifest of record
+
+The frozen-v2 corpus pre-tokenization finished on NERSC: **30,376 token shards** in
+`$SCRATCH/dr1_tokenized_v2/*.npz` (one `{survey}_{program}_{healpix}.npz` per healpix
+across the full DR1 corpus). X1 is done; the ConvNeXt encoder is now out of the
+transformer training loop.
+
+**Manifest of record (write this down):** the cache was built from
+**`$SCRATCH/manifests/dr1_v2_full.jsonl`** — the full-DR1 natural-distribution manifest,
+NOT one of the balanced/scaled manifests under `$SCRATCH/deepsrch/manifests/`
+(`dr1_v2_balanced_{2k,3k,7k,10k}.jsonl`, `dr1_{10k,20k,50k}.jsonl`, etc., which were the
+tokenizer-training and smaller-scale experiments). This matches the 2026-06-13
+"Stratified train/val split for full DR1" decision (transformer-v2 trains on the full
+natural corpus) and is consistent with the 30,376-shard count.
+
+**Why it must be exact:** `train_transformer.py --tokenized-dir` maps each manifest record
+to its `{survey}_{program}_{healpix}.npz` shard, so the X2 training launch **must** pass
+`--manifest $SCRATCH/manifests/dr1_v2_full.jsonl` — any other manifest silently drops
+records lacking a matching shard. `--manifest` is still `required=True` because it is the
+index + the (stratified) healpix train/val split; `--tokenized-dir` only supplies the
+cached tokens.
+
+X2 smoke launch (corrected, after hitting "the following arguments are required:
+--manifest"):
+
+```bash
+python nersc/train_transformer.py \
+    --manifest $SCRATCH/manifests/dr1_v2_full.jsonl \
+    --tokenized-dir $SCRATCH/dr1_tokenized_v2 \
+    --approach a --masked-targets-only \
+    --mask-ratio-min 0.15 --mask-ratio-max 0.75 \
+    --redshift-soft-sigma 1.5 --smoke
+```
+
+**X2 smoke verified on NERSC (run `662cwwx6`).** Cache wired correctly
+(`cached tokens … encoder not loaded`), all 30,376 records matched a shard
+(manifest↔cache exact), stratified split 28,856/1,520, `mask_ratio=U[0.15,0.75]`
++ `masked_targets_only=True`, loss decreasing (z_loss 7.27→5.36). The
+`only 578 z values for 256 bins` warning is a **smoke-only artifact**: the smoke
+block forces `z_fit_files=min(_,5)` (`train_transformer.py:227`), so it scanned
+5 shards; the real run scans 200 → ~23k z (≈90/quantile at 256 bins), stable.
+
+## 2026-06-18: X3 — 4096 z-bins + fp32 soft labels + cache-aware DDP launcher
+
+Folding X3 into the X2 cache run (user wants both). Three parts:
+
+1. **fp32 soft-CE** (`src/models/transformer.py::_redshift_soft_ce`): cast
+   `red_logits` to float32 before the Gaussian soft-label build + full-vocab
+   `log_softmax`. At 4096 bins under `--amp` (bf16), the per-row Gaussian
+   normalization and the log_softmax tail lose precision in bf16, making the
+   soft-label gradient noisy. The upcast is one position per sequence — cheap —
+   and makes the redshift objective dtype-independent. No behavior change at
+   256 bins / fp32. Tests: 88 passed (soft/redshift/transformer/mask suite).
+
+2. **z-fit-files for 4096 bins**: 4096 bins need ≥~82k z (≥20/quantile), so the
+   X3 launch raises `--z-fit-files 200 → 800` (~92k z at ~115/shard). Left at
+   256-bin default otherwise.
+
+3. **Cache-aware DDP wrapper** (`nersc/train_transformer_ddp.slurm`): was
+   hard-required on `TOKENIZER_CKPT` + `--tokenizer-ckpt` (legacy on-the-fly).
+   Now env-driven and backward-compatible:
+   - `TOKENIZED_DIR` → `--tokenized-dir` (encoder not loaded); `TOKENIZER_CKPT`
+     only required when `TOKENIZED_DIR` unset.
+   - X2: `MASKED_TARGETS_ONLY=1`, `MASK_RATIO_MIN/MAX`.
+   - X3: `Z_BINS=4096`, `REDSHIFT_SOFT_SIGMA` (in bins; 0 = hard CE),
+     `Z_FIT_FILES`.
+   - Cache runs default `MANIFEST=$SCRATCH/manifests/dr1_v2_full.jsonl` and
+     error (not silently rebuild) if it's missing. Flags assembled via bash
+     arrays (verified: cache+X2+X3 and legacy+hard-CE both assemble correctly).
+
+**Soft-sigma at 4096 bins**: the 256-bin run used sigma 1.5; 4096/256 = 16×
+finer, so sigma `1.5 × 16 = 24` bins preserves the same physical z-width of the
+soft label. Conditioning dropout stays v9's 0.5 (`--redshift-mask-ratio`, the
+wrapper default).
+
+X2+X3 launch (full run):
+
+```bash
+TOKENIZED_DIR=$SCRATCH/dr1_tokenized_v2 \
+    MANIFEST=$SCRATCH/manifests/dr1_v2_full.jsonl \
+    MASKED_TARGETS_ONLY=1 MASK_RATIO_MIN=0.15 MASK_RATIO_MAX=0.75 \
+    Z_BINS=4096 Z_FIT_FILES=800 REDSHIFT_SOFT_SIGMA=24 \
+    RUN_NAME=approach_a_v2cache_x2x3_ddp4 \
+    sbatch nersc/train_transformer_ddp.slurm
+```

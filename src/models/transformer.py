@@ -487,6 +487,12 @@ class SpectrumTransformer(nn.Module):
             (B,) per-sample CE. Rows with padded targets return a finite
             (meaningless) value that the caller zeroes via the valid mask.
         """
+        # Compute in fp32 regardless of autocast dtype: at 4096 bins the
+        # Gaussian normalization and the full-vocab log_softmax tail lose
+        # precision in bf16/fp16, so the soft-label gradient gets noisy. The
+        # upcast is cheap (one position per sequence) and makes the redshift
+        # objective dtype-independent.
+        red_logits = red_logits.float()
         B, V = red_logits.shape
         n_bins = V - REDSHIFT_TOKEN_OFFSET  # redshift sub-vocab width (e.g. 256, 4096)
         true_bin = (red_targets - REDSHIFT_TOKEN_OFFSET).clamp(0, n_bins - 1).float()  # (B,)
