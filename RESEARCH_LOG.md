@@ -2348,3 +2348,21 @@ faster than many memmapped slice seeks. Verified by running the smoke end-to-end
 (both default and X2-on: `--masked-targets-only --mask-ratio-min 0.3
 --mask-ratio-max 0.7`) — 100 steps, loss decreasing, `final.pt` saved — and
 `tests/test_dataset.py` stays green (10 passed).
+
+**Tokenizer v2 released + reconstruction notebook.** Registered
+`spectrum_tokenizer_v2` as a release checkpoint on NERSC (`setup_release_checkpoints.py
+--copy`, frozen `final.pt` @ step 80k; `default_tokenizer` stays v1 since the released
+v9 transformer was trained on v1 tokens). Added
+`notebooks/08_tokenizer_v2_reconstructions.ipynb` — tokenizer-only (encode→decode, no
+transformer) on the local DESI data: flux reconstructions with raw 1σ-noise rows, the
+istd (noise) channel reconstruction, per-spectrum χ²/pixel + ivar-weighted R²
+distributions, pooled high-SNR R², and codebook utilization. Executed end-to-end on the
+29 local spectra: χ²/pixel median 0.894, **pooled R²(SNR>3) = 0.993** (on par with
+AION-1's token reconstruction R² = 0.994), codebook 341/1024 used. Per-spectrum R²
+median is low (~0.41) on bright/low-SNR objects — expected, hence χ² and pooled-SNR R²
+are the headline numbers.
+
+Heads-up (not yet fixed): running `setup_release_checkpoints.py` on NERSC regenerated
+`MANIFEST.json` with only `spectrum_tokenizer_v2` under `models` (v1/v9 artifacts weren't
+present there), so the transformer notebook's v1/v9 lookups would break until MANIFEST is
+regenerated on a machine that has all three artifacts.
