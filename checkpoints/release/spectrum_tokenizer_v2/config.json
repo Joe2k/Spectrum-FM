@@ -1,0 +1,7 @@
+{
+  "model_id": "spectrum_tokenizer_v2",
+  "display_name": "Spectrum-FM Spectrum Tokenizer v2 (Huber ivar-NLL, wavelength-aware, balanced DR1)",
+  "wandb_artifact": "jjayaseelan-university-of-san-francisco/redshifty/tokenizer_tokenizer_v2_3k_v3 (run waotf2n0, final.pt @ step ~80k; not the best-val artifact)",
+  "checkpoint": "spectrum_tokenizer_v2/best.pt",
+  "role": "spectrum_tokenizer"
+}
