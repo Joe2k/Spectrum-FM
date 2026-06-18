@@ -40,6 +40,7 @@ def tokenize_and_build(
     redshift_mask_ratio: float = 0.0,
     rng: Optional[torch.Generator] = None,
     wavelength_aware: bool = False,
+    mask_targets_only: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Convert a raw spectrum batch into transformer-ready sequences.
 
@@ -71,6 +72,15 @@ def tokenize_and_build(
             spectrum tokenizer so it resamples onto the fixed wavelength
             grid instead of length-stretching. Use ONLY with a tokenizer
             trained wavelength-aware (v2+); v1 expects the legacy stretch.
+        mask_targets_only: MAE-style spectrum objective. When True, the
+            spectrum reconstruction is supervised ONLY at the positions the
+            encoder masked — the target at the *un*masked spectrum positions
+            is set to -100 (ignore_index), so the model can't earn reward by
+            copying visible tokens across cross-attention. The redshift token
+            (position 0) and EOS stay supervised. Requires `encoder_mask_ratio
+            > 0` to have any effect; with no encoder masking `masked_positions`
+            is None and this is a no-op. Default False = supervise every
+            spectrum position (legacy behavior).
 
     Returns:
         encoder_input: (B, L_enc) long tensor.
@@ -159,6 +169,14 @@ def tokenize_and_build(
     # Decoder input and target use the UNMASKED spec_tokens.
     decoder_input = torch.cat([sos, rz, spec_tokens], dim=1)
     target = torch.cat([rz, spec_tokens, eos], dim=1)
+
+    # MAE-style objective: supervise only the encoder-masked spectrum
+    # positions. The spectrum block sits at target indices [1, 1+T_spec);
+    # set the unmasked ones to -100 so the loss/metrics ignore them. The
+    # redshift token (index 0) and EOS (index 1+T_spec) stay supervised.
+    if mask_targets_only and masked_positions is not None:
+        spec_target = target[:, 1:1 + T_spec]
+        spec_target[~masked_positions] = -100
 
     return encoder_input, decoder_input, target, masked_positions
 

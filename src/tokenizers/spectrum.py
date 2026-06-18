@@ -28,7 +28,10 @@ import numpy as np
 
 # Fixed latent grid (matches AION paper)
 LATENT_GRID_SIZE = 8704
-N_TOKENS = 273
+# Number of discrete tokens `encode()` emits per spectrum: LATENT_GRID_SIZE
+# downsampled by the stride-32 encoder = 8704 / 32 = 272. (Was 273 — an
+# off-by-one that never matched encode()'s actual output width.)
+N_TOKENS = 272
 
 # Fixed WAVELENGTH grid the latent grid corresponds to (AION convention):
 # 3500.0 .. 10462.4 Angstrom at 0.8 A spacing — exactly 8704 points.

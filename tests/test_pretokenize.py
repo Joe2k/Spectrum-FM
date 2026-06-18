@@ -172,3 +172,21 @@ class TestRoundtripEquivalence:
         # encoder (masked), decoder, target, and mask positions all identical
         assert torch.equal(on_fly[0], cached[0])
         assert torch.equal(on_fly[3], cached[3])
+
+    def test_sequences_identical_masked_targets_only(self, tmp_path):
+        # The X2 masked-targets-only objective must produce byte-identical
+        # sequences (incl. the -100 target positions) from cache vs on-the-fly.
+        spec_tok, z_tok, flux_batch, _ = self._setup(tmp_path)
+        ds = DR1CachedTokenDataset(tmp_path)
+        cached_batch = collate_cached_skip_none([ds[i] for i in range(len(ds))])
+        dev = torch.device("cpu")
+        kw = dict(encoder_mask_ratio=0.5, mask_targets_only=True)
+        on_fly = tokenize_and_build(flux_batch, spec_tok, z_tok, "a", dev,
+                                    wavelength_aware=True,
+                                    rng=torch.Generator().manual_seed(11), **kw)
+        cached = tokenize_and_build(cached_batch, None, z_tok, "a", dev,
+                                    rng=torch.Generator().manual_seed(11), **kw)
+        for a, b in zip(on_fly[:4], cached[:4]):  # enc, dec, tgt (with -100), mask
+            assert torch.equal(a, b)
+        # The objective actually dropped some targets to ignore_index.
+        assert (on_fly[2] == -100).any()

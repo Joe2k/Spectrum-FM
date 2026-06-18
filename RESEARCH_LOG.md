@@ -2208,3 +2208,132 @@ points at the canonical CFS DR1 (`build_dr1_index --root` default
 `/global/cfs/cdirs/desi/public/dr1`), read once. Only the ~5 GB token cache lives
 on scratch (the working set training reads); copy it to CFS after build since
 scratch is purged.
+
+---
+
+## 2026-06-16: X2 — masked-targets-only objective + variable mask ratio
+
+**Why.** The encoder masked ~15% of spectrum tokens, but the decoder was
+teacher-forced on the full unmasked sequence and the loss ran over *all* spectrum
+target positions (`transformer.py:461-463`). For the unmasked ~85% the decoder
+just copies the answer across cross-attention — free reward. That diluted the
+gradient with trivially-copyable positions, inflated the logged `spectrum_acc`
+(the honest `masked_spec_acc` was tracked but not optimized), and contradicted the
+locked-in T3 finding that exact token identity is largely noise-driven — so
+supervising every position on exact match is the wrong objective.
+
+**Change (both opt-in, fully backward-compatible — existing runs byte-identical
+with the flags off):**
+
+- **Masked-targets-only loss** (`tokenize_and_build`, new `mask_targets_only` arg):
+  set the spectrum target at the *un*masked positions to `-100`, so reconstruction
+  is supervised ONLY where the encoder masked (real MAE in-filling). Redshift
+  (position 0) and EOS stay supervised. No model change needed — the loss already
+  honors `ignore_index=-100` with `n_spec.clamp(min=1)`, and `compute_metrics`
+  ignores `-100`, so the headline `spectrum_acc` becomes the honest masked number
+  for free. CLI: `--masked-targets-only` in `train_transformer.py`.
+- **Variable mask ratio** (`train_transformer.py`, `--mask-ratio-min/--mask-ratio-max`):
+  each step samples ratio ~ Uniform[min,max] from a step-seeded generator
+  (`seed+step`) so the schedule is deterministic across resumes and identical
+  across DDP ranks. Unset = fixed `--encoder-mask-ratio` (unchanged). The sampled
+  `mask_ratio` is logged per step in `metrics.jsonl`.
+
+**Verified.** New unit tests in `tests/test_training_helpers.py`
+(`TestMaskedTargetsOnly`): unmasked spectrum targets become `-100`, masked keep
+the true token, redshift/EOS always supervised, no-op at ratio 0, flag-off
+unchanged, approach-b parity. Cache-parity roundtrip extended in
+`tests/test_pretokenize.py` (cached == on-the-fly under the new flag, incl. the
+`-100` positions). Loss sanity (CPU, tiny model): flag on supervises ~ratio·T_spec
+positions (13/32 at ratio 0.5) vs 32/32 off, loss finite both ways.
+
+Recommended v2-campaign launch (after the X1 cache lands + `--verify`):
+`--tokenized-dir … --approach a --masked-targets-only --mask-ratio-min 0.3
+--mask-ratio-max 0.7 --redshift-soft-sigma 1.5`. Next: X3 (4096 z-bins + fp32 soft
+labels), X5 (SDPA/bf16/KV-cache), X4 eval (NMAD/outliers) — all on `--tokenized-dir`.
+
+---
+
+## 2026-06-16: Notebook 07 — "blind" reconstruction panel (honest AR)
+
+Realized the autoregressive panel (Viz 2) in `notebooks/07_visualize_predictions.ipynb`
+is not a "predict without info" test: it's AR on the *decoder* only, but with
+`ENCODER_MASK_RATIO = 0.0` the **encoder sees the full spectrum** (and, for
+Approach A, the true redshift), so the decoder reconstructs by *copying through
+cross-attention*. Both TF and AR there leave the copy path open, so AR≈TF mostly
+proves the copy works.
+
+Added **Visualization 2b/2c — blind reconstruction**: a new `predict_autoregressive_blind`
+helper + two panels (50% and 90% encoder masking) that mask the encoder's spectrum
+tokens (`[MASK]`) and hide the redshift (`[REDMASK]`, Approach A; the v9 `redmask50`
+model is in-distribution for this), then generate. The masked positions are absent
+from the encoder, so they must be *inferred* — the genuinely honest reconstruction.
+Prints `blind MSE` at each mask fraction to compare against the copy-path AR/TF MSE in
+Viz 5; the gap (and the 50%→90% degradation) is the size of the copy shortcut. The
+eval-side mirror of the X2 training change.
+
+Also fixed the **redshift panel (Viz 3)**, which previously did not mask redshift in
+the encoder — both `tf_z` (`predict_teacher_forced`) and `ar_z` (Viz 2
+`predict_autoregressive`) ran with `redshift_mask_ratio=0.0`, so for Approach A the
+true redshift token was in the encoder and the reported z-MAE was *copy fidelity*, not
+inference. Added a third **"blind (z hidden)"** series + MAE using
+`blind_generated[:, 1]` (encoder redshift = `[REDMASK]`) — the honest spectrum→z
+number. The scatter now distinguishes the copy path (tf/ar) from honest inference.
+
+Follow-ups in notebook 07:
+- **Mask visualization**: Viz 2b (50%) and 2c (90%) now shade which latent-grid
+  regions were hidden from the encoder vs visible, and print a masked(inferred) /
+  visible(anchor) MSE split — directly showing where the reconstruction error lives.
+- **N_TOKENS derived from the tokenizer**: the module constant
+  `src.tokenizers.spectrum.N_TOKENS` is **stale (273)** — `encode()` actually emits
+  **272** tokens (wavelength-aware resampling onto a fixed latent grid, independent of
+  input length). The notebook now overrides `N_TOKENS` from a probe encode right after
+  the model load, so every panel slices/masks the correct width (this also fixes a
+  latent off-by-one where the old 273 slice grabbed the EOS token as a "spectrum
+  token"). The library constant should eventually be corrected to 272.
+- **SDSS OOD blind panels (Viz 6b)**: added 50% and 90% blind reconstructions on
+  out-of-distribution SDSS, with the same orange mask shading (gray reserved for
+  outside-SDSS-coverage edges) and per-ratio MSE — the OOD mirror of Viz 2b/2c.
+- **SDSS redshift panel (Viz 7)**: had the same copy leak as Viz 3 — `ood_generated`
+  ran with `redshift_mask_ratio=0.0`, so Approach A read z off the encoder. Added the
+  honest **blind (z hidden)** series (`predict_autoregressive_blind(ood_batch, …,
+  mask_ratio=0.0)`: full spectrum visible, encoder z = `[REDMASK]`) + its MAE, so the
+  OOD redshift number is genuine spectrum→z. Both redshift panels (DESI Viz 3, SDSS
+  Viz 7) are now consistent.
+
+**Instructor request — redshift from the full (unmasked) spectrum.** The deliverable
+of a spectrum FM is measuring z from a *full observed spectrum*, not a masked one
+(masking was only a training aid). Added a dedicated section: `predict_redshift_fullspec`
+runs the encoder on the **entire** spectrum (`encoder_mask_ratio=0.0`) with only the
+redshift hidden (`[REDMASK]`, since it's the predicted quantity). Redshift is decoder
+position 0, so it's read from a **single decode step** (no autoregression) — fast enough
+to evaluate the whole sample. Reports NMAD of Δz/(1+z), catastrophic outlier fractions
+(>0.003, >0.01), MAE, median bias, plus the 256-bin quantization floor. Run over the
+**entire** local DESI sample (in-distribution) and a freshly-streamed **100**-spectrum
+SDSS sample (OOD); reconstruction panels stay at N_OOD rows for legibility. Caveat
+logged in-notebook: a strict val number needs the held-out split on NERSC (local tiles
+may overlap training).
+
+Fixed a `Broken pipe` RuntimeError from streaming SDSS twice: a second
+`load_dataset('MultimodalUniverse/sdss', streaming=True)` re-init while the first
+stream's multiprocessing shm handles were alive throws it. The SDSS-load cell now
+streams **once** into `sdss_pool` (up to 100) and the panels use `sdss_raw =
+sdss_pool[:N_OOD]`; the redshift metric reuses `sdss_pool` instead of re-streaming.
+(A subsequent broken pipe on the *first* load means the prior double-stream already
+killed the kernel's `torch_shm_manager` → restart the kernel; load cell also sets
+`torch.multiprocessing.set_sharing_strategy('file_system')` defensively.)
+
+Added a **raw-data noise row** to the three masked panels (DESI Viz 2b/2c, SDSS Viz
+6b): a third sub-row per sample plotting the per-pixel **1σ = 1/√ivar** from the
+observed spectrum's inverse-variance array (`batch['ivar']` / `ood_batch['ivar']`),
+in the same physical-flux units as the flux/residual, with `nan` gaps where ivar≤0.
+Lets the reader judge whether the reconstruction residual sits within the measurement
+noise. (This is the raw measurement noise that comes with the spectrum, not a
+tokenizer-derived quantity.)
+
+**Source fix:** corrected `src/tokenizers/spectrum.py` `N_TOKENS` **273 → 272** to
+match `encode()`'s actual output (`LATENT_GRID_SIZE 8704 / stride-32 = 272`, verified).
+The constant was a documentation/export value — its only library consumer
+(`src/inference/release.py:24`) imports but never uses it, so nothing relied on 273.
+Full suite green (210 passed; the lone failure is the pre-existing, unrelated
+`test_missing_api_key_falls_back_to_offline`). The notebook's derive-from-tokenizer
+override now agrees with the corrected constant.

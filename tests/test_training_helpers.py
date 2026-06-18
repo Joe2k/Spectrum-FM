@@ -156,6 +156,66 @@ class TestEncoderMasking:
 
 
 # ---------------------------------------------------------------------------
+# Masked-targets-only objective (X2) — supervise only encoder-masked positions
+# ---------------------------------------------------------------------------
+
+class TestMaskedTargetsOnly:
+    def test_unmasked_spectrum_targets_become_ignore(self):
+        spec, z = FakeSpecTok(n_tokens=8), FakeZTok()
+        raw = _make_raw_batch(B=4)
+        g = torch.Generator().manual_seed(7)
+        enc, dec, tgt, mp = tokenize_and_build(
+            raw, spec, z, "a", torch.device("cpu"),
+            encoder_mask_ratio=0.5, rng=g, mask_targets_only=True,
+        )
+        # Target layout (A & B): [redshift, s1..s8, EOS]. Spectrum block = [1, 9).
+        spec_tgt = tgt[:, 1:1 + 8]
+        # Masked positions keep the true spectrum token; unmasked become -100.
+        assert (spec_tgt[~mp] == -100).all()
+        assert (spec_tgt[mp] != -100).all()
+        assert (spec_tgt[mp] >= SPECTRUM_TOKEN_OFFSET).all()
+        # Redshift (index 0) and EOS (last) are always supervised.
+        assert (tgt[:, 0] != -100).all()
+        assert (tgt[:, -1] == EOS_TOKEN).all()
+        # Decoder input is untouched (still teacher-forced on the truth).
+        assert (dec == -100).sum().item() == 0
+
+    def test_no_op_when_no_encoder_masking(self):
+        spec, z = FakeSpecTok(n_tokens=8), FakeZTok()
+        raw = _make_raw_batch(B=2)
+        _, _, tgt, mp = tokenize_and_build(
+            raw, spec, z, "a", torch.device("cpu"),
+            encoder_mask_ratio=0.0, mask_targets_only=True,
+        )
+        assert mp is None
+        assert (tgt == -100).sum().item() == 0
+
+    def test_flag_off_supervises_every_position(self):
+        spec, z = FakeSpecTok(n_tokens=8), FakeZTok()
+        raw = _make_raw_batch(B=2)
+        g = torch.Generator().manual_seed(7)
+        _, _, tgt_off, _ = tokenize_and_build(
+            raw, spec, z, "a", torch.device("cpu"),
+            encoder_mask_ratio=0.5, rng=g, mask_targets_only=False,
+        )
+        # Legacy behavior: no ignore_index introduced anywhere.
+        assert (tgt_off == -100).sum().item() == 0
+
+    def test_approach_b_masked_targets_only(self):
+        spec, z = FakeSpecTok(n_tokens=8), FakeZTok()
+        raw = _make_raw_batch(B=3)
+        g = torch.Generator().manual_seed(3)
+        _, _, tgt, mp = tokenize_and_build(
+            raw, spec, z, "b", torch.device("cpu"),
+            encoder_mask_ratio=0.5, rng=g, mask_targets_only=True,
+        )
+        # Target is the same [redshift, s1..s8, EOS] regardless of approach.
+        spec_tgt = tgt[:, 1:1 + 8]
+        assert (spec_tgt[~mp] == -100).all()
+        assert (spec_tgt[mp] != -100).all()
+
+
+# ---------------------------------------------------------------------------
 # Redshift conditioning dropout — REDMASK in the encoder
 # ---------------------------------------------------------------------------
 

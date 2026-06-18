@@ -129,7 +129,26 @@ def parse_args():
     p.add_argument("--encoder-mask-ratio", type=float, default=0.15,
                    help="Fraction of encoder spectrum positions to replace "
                         "with [MASK]. BERT-style. 0.0 disables; 0.15 is "
-                        "BERT canonical. Forces honest spectrum reconstruction.")
+                        "BERT canonical. Forces honest spectrum reconstruction. "
+                        "Ignored when --mask-ratio-min/--mask-ratio-max are set "
+                        "(the ratio is then sampled per step from that range).")
+    p.add_argument("--mask-ratio-min", type=float, default=None,
+                   help="Lower bound for per-step variable encoder mask ratio. "
+                        "When both --mask-ratio-min and --mask-ratio-max are "
+                        "set, each step samples ratio ~ Uniform[min, max] "
+                        "(MAE-style schedule). Unset = fixed "
+                        "--encoder-mask-ratio. Try 0.3 with --mask-ratio-max 0.7.")
+    p.add_argument("--mask-ratio-max", type=float, default=None,
+                   help="Upper bound for per-step variable encoder mask ratio. "
+                        "See --mask-ratio-min.")
+    p.add_argument("--masked-targets-only", action="store_true",
+                   help="MAE-style spectrum objective: supervise reconstruction "
+                        "ONLY at encoder-masked positions (unmasked spectrum "
+                        "targets become ignore_index). Stops the decoder earning "
+                        "reward by copying visible tokens, and makes the logged "
+                        "spectrum_acc the honest masked number. Redshift stays "
+                        "supervised. Needs encoder masking > 0. Default off "
+                        "(supervise every spectrum position = legacy behavior).")
     p.add_argument("--redshift-mask-ratio", type=float, default=0.5,
                    help="Per-sample probability of replacing the encoder's "
                         "redshift token with [REDMASK] (Approach A only). "
@@ -208,6 +227,21 @@ def main():
         args.z_fit_files = min(args.z_fit_files, 5)
         args.ar_eval_batches = 1
 
+    # Variable mask-ratio schedule: both bounds must be given together and form
+    # a valid sub-interval of [0, 1]. When unset, training uses the fixed
+    # --encoder-mask-ratio (unchanged behavior).
+    args.variable_mask = args.mask_ratio_min is not None or args.mask_ratio_max is not None
+    if args.variable_mask:
+        if args.mask_ratio_min is None or args.mask_ratio_max is None:
+            raise ValueError(
+                "--mask-ratio-min and --mask-ratio-max must be set together"
+            )
+        if not 0.0 <= args.mask_ratio_min <= args.mask_ratio_max <= 1.0:
+            raise ValueError(
+                f"need 0 <= mask-ratio-min ({args.mask_ratio_min}) <= "
+                f"mask-ratio-max ({args.mask_ratio_max}) <= 1"
+            )
+
     # Detect DDP: either explicit RANK env var (from SLURM script exports)
     # or SLURM's native SLURM_PROCID (from interactive srun).
     is_distributed = "RANK" in os.environ or "SLURM_PROCID" in os.environ
@@ -232,8 +266,11 @@ def main():
         rank, world_size, local_rank = 0, 1, 0
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    mask_desc = (f"U[{args.mask_ratio_min},{args.mask_ratio_max}]"
+                 if args.variable_mask else f"{args.encoder_mask_ratio}")
     print(f"[setup] rank={rank}/{world_size} device={device} approach={args.approach} "
-          f"steps={args.steps} mask_ratio={args.encoder_mask_ratio} "
+          f"steps={args.steps} mask_ratio={mask_desc} "
+          f"masked_targets_only={args.masked_targets_only} "
           f"redshift_mask_ratio={args.redshift_mask_ratio} "
           f"redshift_weight={args.redshift_loss_weight}")
     run_dir = args.scratch_out / "checkpoints" / args.run_name
@@ -441,10 +478,25 @@ def main():
         for g_ in optim.param_groups:
             g_["lr"] = lr_at(step, args.lr, args.warmup, args.steps)
 
+        # Per-step encoder mask ratio. With --mask-ratio-min/max, sample
+        # Uniform[min, max] from a step-seeded generator so the schedule is
+        # deterministic and identical across resumes and DDP ranks (all ranks
+        # share seed+step). Otherwise use the fixed ratio.
+        if args.variable_mask:
+            mr_gen = torch.Generator().manual_seed(args.seed + step)
+            mask_ratio = (
+                args.mask_ratio_min
+                + (args.mask_ratio_max - args.mask_ratio_min)
+                * torch.rand((), generator=mr_gen).item()
+            )
+        else:
+            mask_ratio = args.encoder_mask_ratio
+
         enc, dec, tgt, mask_pos = tokenize_and_build(
             raw, spec_tok, z_tok, args.approach, device,
-            encoder_mask_ratio=args.encoder_mask_ratio,
+            encoder_mask_ratio=mask_ratio,
             redshift_mask_ratio=args.redshift_mask_ratio,
+            mask_targets_only=args.masked_targets_only,
         )
 
         optim.zero_grad(set_to_none=True)
@@ -478,6 +530,7 @@ def main():
                 **m, **b,
                 "masked_spec_acc": mm["masked_spec_acc"],
                 "n_masked": mm["n_masked"],
+                "mask_ratio": mask_ratio,
                 "steps_per_sec": rate, "elapsed_s": dt,
             }
             print(f"[step {step:6d}] loss={msg['loss']:.4f} "
