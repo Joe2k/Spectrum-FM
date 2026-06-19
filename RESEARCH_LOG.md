@@ -2638,3 +2638,120 @@ outlier fraction over 1,024 z-bins and reports DESI-spectrum z as ~"perfect"
 SDSS OOD eval stays **out of scope** here (run separately in local notebooks via
 `resample_to_grid` + this module). Possible follow-up if expected-value decoding
 plateaus: a learned sub-bin regression head.
+
+## 2026-06-18: two live full runs in flight — 4096-soft (`aqxmwgl1`) + 512-hard control (`cd1ikb99`) + resume commands
+
+Two parallel X2 full runs on the v2 cache are now the runs of record; both hit the
+4h wallclock boundary (W&B `crashed`) and resume from their rolling `last.pt`. The
+512-bin hard-CE run is **new and was not previously logged** — recording it here so
+it isn't mistaken for a stray.
+
+**Run A — `aqxmwgl1` `approach_a_v2cache_x2x3_ddp4` (4096 soft, σ=24):** the X2+X3
+main line (continuation of the `dcsvevx3` post-NaN relaunch). Last heartbeat step
+89,400. Redshift is **not learning** on this run — `val/loss_redshift` 4.64 and
+`train/redshift_acc ≈ 0` (random CE at 4096 bins = ln4096 = 8.32, so it's below
+random in nats but bin-exact acc is ~0); spectrum side healthy (`val/spec_acc`
+0.263). 4096 bin-exact acc is the wrong lens (judge on σ_NMAD, X4); still, the flat
+redshift signal is why the 512-hard control exists.
+
+**Run B — `cd1ikb99` `approach_a_v2cache_x2_512hard_ctrl_ddp4` (512 hard, σ=0):**
+control to isolate whether the 4096-bin soft-label head is what's starving redshift.
+Same everything else (manifest, cache, X2 masking, weight 1.0, bf16, d768/6+6/12h)
+but **z-bins 512, hard CE (`--redshift-soft-sigma 0`), `--z-fit-files 400`**. Much
+healthier redshift: at step 59,980 `train/redshift_acc` 0.656 / within2 0.781,
+`val/redshift_acc` 0.19 / within2 0.596 — i.e. the head *does* learn z at 512 hard
+bins, supporting the hypothesis that the 4096-soft config (not the data/masking) is
+the blocker. Both runs share `--steps 200000`, `--ar-every-steps 10000`, bf16 +
+finite-loss guard.
+
+Ignored as wrong/stale: `dcsvevx3` (NaN, stale `--redshift-loss-weight 10`) and the
+smoke runs `weh54f9g` / `662cwwx6`.
+
+**Resume commands of record** (interactive DDP4 under `salloc`; `srun
+--gpu-bind=none` so each rank binds its own GPU; re-pass `--z-bins` + model-dim +
+X2/X3 flags — the `--z-bins` guard errors on mismatch; `--resume` restores
+step/best_val/wandb_run_id so W&B continues the same run):
+
+```bash
+# aqxmwgl1 — 4096 soft (X2+X3)
+srun --gpu-bind=none python nersc/train_transformer.py \
+    --resume $SCRATCH/deepsrch/checkpoints/approach_a_v2cache_x2x3_ddp4/last.pt \
+    --manifest $SCRATCH/manifests/dr1_v2_full.jsonl \
+    --tokenized-dir $SCRATCH/dr1_tokenized_v2 \
+    --approach a --masked-targets-only \
+    --mask-ratio-min 0.15 --mask-ratio-max 0.75 \
+    --z-bins 4096 --z-fit-files 800 --redshift-soft-sigma 24 \
+    --redshift-loss-weight 1.0 --encoder-mask-ratio 0.5 --redshift-mask-ratio 0.5 \
+    --amp --amp-dtype bf16 \
+    --steps 200000 --batch-size 32 --lr 8e-4 \
+    --num-workers 12 --d-model 768 --n-encoder-layers 6 --n-decoder-layers 6 --n-heads 12 \
+    --healpix-holdout-frac 0.05 --ar-eval-batches 8 --ar-every-steps 10000 \
+    --run-name approach_a_v2cache_x2x3_ddp4 --wandb-project redshifty
+
+# cd1ikb99 — 512 hard (control)
+srun --gpu-bind=none python nersc/train_transformer.py \
+    --resume $SCRATCH/deepsrch/checkpoints/approach_a_v2cache_x2_512hard_ctrl_ddp4/last.pt \
+    --manifest $SCRATCH/manifests/dr1_v2_full.jsonl \
+    --tokenized-dir $SCRATCH/dr1_tokenized_v2 \
+    --approach a --masked-targets-only \
+    --mask-ratio-min 0.15 --mask-ratio-max 0.75 \
+    --z-bins 512 --z-fit-files 400 --redshift-soft-sigma 0 \
+    --redshift-loss-weight 1.0 --encoder-mask-ratio 0.5 --redshift-mask-ratio 0.5 \
+    --amp --amp-dtype bf16 \
+    --steps 200000 --batch-size 32 --lr 8e-4 \
+    --num-workers 12 --d-model 768 --n-encoder-layers 6 --n-decoder-layers 6 --n-heads 12 \
+    --healpix-holdout-frac 0.05 --ar-eval-batches 8 --ar-every-steps 10000 \
+    --run-name approach_a_v2cache_x2_512hard_ctrl_ddp4 --wandb-project redshifty
+```
+
+The two commands differ only in the three z-head flags (`--z-bins` /
+`--z-fit-files` / `--redshift-soft-sigma`) and the resume path / run-name;
+everything else matches each run's logged W&B config.
+
+---
+
+## 2026-06-18: X4 first real numbers (held-out DESI val) — and X8 (uncertainty/rejection)
+
+Ran the X4 eval (`nersc/eval_redshift.py`, cached path, login-node-light) on the
+held-out val split of both live runs' `best.pt`. **First physical redshift
+numbers, and they reframed the problem:**
+
+| model | bins | σ_NMAD (exp) | σ_NMAD (argmax) | η>0.0033 | η>0.05 | bias |
+|---|---|---|---|---|---|---|
+| 512-hard (`cd1ikb99`, ~63k) | 512 | 0.000822 | 0.000903 | 11.0% | 2.9% | +6.1e-5 |
+| **4096-soft (`aqxmwgl1`, ~89k)** | 4096 | **0.000696** | 0.000736 | **9.0%** | **1.4%** | +3.1e-5 |
+| SpecPT (ref) | — | 0.0006–0.0008 | — | 0.2–0.8% | — | — |
+
+Findings:
+1. **Bin accuracy was misleading.** 512-hard had higher exact-bin accuracy
+   (within2 0.79 vs 0.31), but on the metric that matters the **4096-soft run
+   wins**: lower σ_NMAD *and* fewer outliers (half the η>0.05). Finer bins + soft
+   labels → more precise z + fewer gross failures. Exactly what X4 was built to
+   surface. Expected-value decode beat argmax in both (X4's sub-bin gain, real).
+2. **σ_NMAD is already SpecPT-competitive, bias ≈ 0** — precision is essentially
+   solved, on *mid-training* checkpoints.
+3. **The entire remaining gap is catastrophic outliers (9–11% vs <1%)** —
+   line-confusion / multimodal-posterior failures, not resolution. So a
+   refinement head (X6) is the wrong move; there's no σ_NMAD floor to chase.
+
+### X8 — uncertainty, calibration & outlier rejection (branch `x8-redshift-uncertainty`, eval-only)
+
+The redshift softmax is a discretized z-posterior for free. New tooling:
+- `src/eval/redshift_uncertainty.py`: `redshift_posterior`, `uncertainty_scores`
+  (entropy, neg_max_prob, **second_mode_ratio** = bimodality flag,
+  posterior_std_z, mass_outside_k), `pit_values` (calibration), `outlier_auroc`
+  (rank-based, no sklearn), `coverage_quality_curve` (reject most-uncertain X% →
+  σ_NMAD/η on the kept subset), `pit_calibration_error` (KS vs uniform).
+- `evaluate()` now also returns `z_auroc_outlier`, `z_nmad_cov90`,
+  `z_outlier_cov90`, `z_pit_ks` (auto-logged `val/…` on resume — a live signal
+  that outlier-separability improves with training). `return_per_sample=True`
+  additionally yields per-sample arrays; default stays scalars-only so the
+  training val dict remains W&B/JSON-safe.
+- `nersc/eval_redshift.py --uncertainty [--dump-npz P]`: prints the coverage
+  table, per-score outlier AUROC, and PIT calibration (KS + histogram).
+- Tests: `tests/test_redshift_uncertainty.py` (9, CPU). Full suite green; X4+X8
+  integration smoke confirms scalars-only dict when `return_per_sample=False`.
+
+Next: run `--uncertainty` on the 4096-soft leader to confirm η>0.0033 collapses
+toward <1% under rejection and AUROC ≳ 0.8; if rejection alone can't reach <1%
+at usable coverage, X8b = a line-aware auxiliary loss to cut outliers at source.

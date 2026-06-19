@@ -18,7 +18,19 @@ from typing import Dict, Optional
 
 import torch
 
-from src.eval.redshift_metrics import decode_redshift, redshift_metrics
+from src.eval.redshift_metrics import (
+    CATASTROPHIC_DZ,
+    decode_redshift,
+    redshift_metrics,
+)
+from src.eval.redshift_uncertainty import (
+    coverage_quality_curve,
+    outlier_auroc,
+    pit_calibration_error,
+    pit_values,
+    redshift_posterior,
+    uncertainty_scores,
+)
 from src.models.transformer import (
     EOS_TOKEN,
     REDSHIFT_TOKEN_OFFSET,
@@ -48,12 +60,20 @@ def evaluate(
     redshift_soft_sigma: float = 0.0,
     max_batches: int = 50,
     amp_dtype: torch.dtype = torch.float16,
+    return_per_sample: bool = False,
 ) -> Dict[str, float]:
     """Teacher-forced eval. Returns a dict of averaged metrics over up to
     `max_batches` batches from `loader`.
 
     Adds `masked_spec_acc` when `encoder_mask_ratio > 0`. Pass
     `redshift_mask_ratio=1.0` to evaluate the honest (z-hidden) regime.
+
+    Always reports physical redshift metrics (σ_NMAD, outliers, bias) and
+    uncertainty-rejection scalars (`z_auroc_outlier`, `z_nmad_cov90`,
+    `z_outlier_cov90`, `z_pit_ks`). With `return_per_sample=True` the dict also
+    carries the per-sample arrays (`z_pred`, `z_true`, `score`, `pit`) for
+    offline coverage/calibration analysis — omitted by default to keep the
+    in-training val cheap.
     """
     model.eval()
     losses = 0.0
@@ -68,6 +88,9 @@ def evaluate(
     # logit distribution back to a continuous z (argmax and expected-value)
     # and compare against the *true continuous* z from the raw batch.
     z_pred_exp, z_pred_arg, z_true_all = [], [], []
+    # Uncertainty scores (per-sample dict) + PIT, for rejection + calibration.
+    # Accumulated per batch, concatenated after the loop.
+    scores_batches, pit_all = [], []
     for i, raw in enumerate(loader):
         if raw is None:
             continue
@@ -98,7 +121,12 @@ def evaluate(
         red_logits = logits[:, 0, :].float()
         z_pred_exp.append(decode_redshift(red_logits, z_tok, mode="expected"))
         z_pred_arg.append(decode_redshift(red_logits, z_tok, mode="argmax"))
-        z_true_all.append(raw["z"].detach().flatten().cpu().float())
+        zt = raw["z"].detach().flatten().cpu().float()
+        z_true_all.append(zt)
+        # Uncertainty scores from the z-posterior + PIT (posterior CDF at truth).
+        probs = redshift_posterior(red_logits, z_tok).cpu()
+        scores_batches.append(uncertainty_scores(probs, z_tok))
+        pit_all.append(pit_values(probs, zt, z_tok))
         n += 1
 
     if n == 0:
@@ -108,7 +136,8 @@ def evaluate(
         if encoder_mask_ratio > 0.0:
             out["masked_spec_acc"] = nan
         for k in ("z_nmad", "z_outlier_frac", "z_outlier_frac_05",
-                  "z_bias", "z_nmad_argmax"):
+                  "z_bias", "z_nmad_argmax", "z_auroc_outlier",
+                  "z_nmad_cov90", "z_outlier_cov90", "z_pit_ks"):
             out[k] = nan
         return out
 
@@ -122,14 +151,36 @@ def evaluate(
     # Physical redshift metrics (AION-comparable). With redshift_mask_ratio=1.0
     # these are the honest predict-z-from-spectrum numbers. Expected-value
     # decoding gives sub-bin precision; argmax is reported for the delta.
+    z_pred = torch.cat(z_pred_exp)
     z_true = torch.cat(z_true_all)
-    me = redshift_metrics(torch.cat(z_pred_exp), z_true)
+    me = redshift_metrics(z_pred, z_true)
     ma = redshift_metrics(torch.cat(z_pred_arg), z_true)
     out["z_nmad"] = me["sigma_nmad"]
     out["z_outlier_frac"] = me["outlier_frac"]
     out["z_outlier_frac_05"] = me["outlier_frac_05"]
     out["z_bias"] = me["bias"]
     out["z_nmad_argmax"] = ma["sigma_nmad"]
+
+    # Uncertainty / calibration scalars (X8). The z-posterior entropy is the
+    # rejection score; report how σ_NMAD/outliers improve at 90% coverage, how
+    # well entropy separates catastrophic outliers (AUROC), and PIT calibration.
+    scores = {k: torch.cat([b[k] for b in scores_batches])
+              for k in scores_batches[0]}
+    score = scores["entropy"]
+    pit = torch.cat(pit_all)
+    dz = (z_pred - z_true) / (1.0 + z_true)
+    is_outlier = dz.abs() > CATASTROPHIC_DZ
+    row90 = coverage_quality_curve(z_pred, z_true, score, fractions=(0.9,))[0]
+    out["z_auroc_outlier"] = outlier_auroc(score, is_outlier)
+    out["z_nmad_cov90"] = row90["sigma_nmad"]
+    out["z_outlier_cov90"] = row90["outlier_frac"]
+    out["z_pit_ks"] = pit_calibration_error(pit)
+
+    if return_per_sample:
+        out["z_pred"] = z_pred
+        out["z_true"] = z_true
+        out["pit"] = pit
+        out["scores"] = scores
     return out
 
 

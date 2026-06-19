@@ -44,6 +44,13 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 
+from src.eval.redshift_metrics import CATASTROPHIC_DZ  # noqa: E402
+from src.eval.redshift_uncertainty import (  # noqa: E402
+    coverage_quality_curve,
+    outlier_auroc,
+    pit_calibration_error,
+    pit_histogram,
+)
 from src.inference.release import _infer_transformer_dims, _restore_z_tokenizer  # noqa: E402
 from src.models.transformer import SpectrumTransformer  # noqa: E402
 from src.tokenizers.spectrum import SpectrumTokenizer  # noqa: E402
@@ -86,6 +93,12 @@ def parse_args():
     p.add_argument("--max-spectra", type=int, default=None)
     p.add_argument("--amp", action="store_true")
     p.add_argument("--amp-dtype", default="bf16", choices=["bf16", "fp16"])
+    p.add_argument("--uncertainty", action="store_true",
+                   help="Also report the quality-vs-coverage curve, outlier-"
+                        "detection AUROC per score, and PIT calibration.")
+    p.add_argument("--dump-npz", type=Path, default=None,
+                   help="With --uncertainty: write per-sample dz/scores/pit "
+                        "to this .npz for notebook plotting.")
     return p.parse_args()
 
 
@@ -149,7 +162,8 @@ def main():
         amp=args.amp, redshift_weight=1.0,
         encoder_mask_ratio=args.encoder_mask_ratio,
         redshift_mask_ratio=args.redshift_mask_ratio,
-        max_batches=args.max_batches, amp_dtype=amp_dtype)
+        max_batches=args.max_batches, amp_dtype=amp_dtype,
+        return_per_sample=args.uncertainty)
 
     regime = "honest (z hidden)" if args.redshift_mask_ratio >= 1.0 else \
         f"z-mask={args.redshift_mask_ratio}"
@@ -165,6 +179,44 @@ def main():
     print(f"  bias  median(Δz)    : {v['z_bias']:+.6f}")
     print(f"  spectrum_acc        : {v['spectrum_acc']:.4f}")
     print("=" * 56)
+
+    if args.uncertainty:
+        _report_uncertainty(v, args)
+
+
+def _report_uncertainty(v, args):
+    """Coverage curve + per-score outlier AUROC + PIT calibration (X8)."""
+    z_pred, z_true = v["z_pred"], v["z_true"]
+    scores, pit = v["scores"], v["pit"]
+    dz = (z_pred - z_true) / (1.0 + z_true)
+    is_outlier = dz.abs() > CATASTROPHIC_DZ
+
+    print("\n  Reject most-uncertain by posterior entropy:")
+    print(f"  {'retained':>9} {'σ_NMAD':>10} {'η>.0033':>9} {'η>.05':>8} {'n':>7}")
+    for r in coverage_quality_curve(z_pred, z_true, scores["entropy"]):
+        print(f"  {r['retained_frac']*100:8.0f}% {r['sigma_nmad']:10.6f} "
+              f"{r['outlier_frac']*100:8.2f}% {r['outlier_frac_05']*100:7.2f}% "
+              f"{r['n']:7d}")
+
+    print(f"\n  Outlier-detection AUROC (η>{CATASTROPHIC_DZ}):")
+    for name, s in scores.items():
+        print(f"    {name:18s}: {outlier_auroc(s, is_outlier):.4f}")
+
+    ks = pit_calibration_error(pit)
+    hist = pit_histogram(pit, bins=10)
+    bars = " ".join(f"{int(c)}" for c in hist)
+    print(f"\n  PIT calibration KS : {ks:.4f}  (0 = uniform = calibrated)")
+    print(f"  PIT histogram (10) : {bars}")
+
+    if args.dump_npz is not None:
+        import numpy as np
+        np.savez(
+            args.dump_npz,
+            dz=dz.numpy(), pit=pit.numpy(),
+            is_outlier=is_outlier.numpy(),
+            **{f"score_{k}": s.numpy() for k, s in scores.items()},
+        )
+        print(f"\n  per-sample arrays -> {args.dump_npz}")
 
 
 if __name__ == "__main__":
