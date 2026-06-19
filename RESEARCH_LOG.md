@@ -2949,3 +2949,56 @@ AUROC 0.985→0.860). The recommendation now keys off the **rejection AUROC** (t
 metric we ship): if T degrades it (or doesn't help PIT) it prints *keep
 `redshift_temperature=1.0`; use X8c recalibration* instead. So the tool's advice
 now matches the documented verdict.
+
+---
+
+## 2026-06-19: pivot to spectrum — X10 flux-space reconstruction metric (measure first)
+
+Redshift is solved (4096-soft finished 200k: σ_NMAD 3.5e-4 @ 90% cov, past
+SpecPT; calibrated via X8c). The remaining concern is **spectrum accuracy**, and
+the 512-hard control (`cd1ikb99`, still running, 174k) confirms the ceiling is
+*not* a soft/hard artifact — both sit at `val/spectrum_acc ≈ 0.27`,
+`masked_spec_acc ≈ 0.28`.
+
+**But `spectrum_acc` is exact top-1 over the 1024-way codebook — almost certainly
+misleading the same way redshift bin-accuracy was** (4096-soft scores 0.04 bin-acc
+yet beats SpecPT on σ_NMAD). Tokenizer v2 is at the information-theoretic floor
+(χ²/pixel ≈ 1.0, code-recon R² 0.998), so a *near-equivalent* predicted code
+scores "wrong" yet decodes to a spectrum within DESI's noise — and we have never
+measured the transformer's masked prediction in **flux space**, only token-match.
+Also: at `redshift_loss_weight=1.0` the now-inflated soft z-loss (≈4.5) dominates
+spectrum loss (≈3.1), starving reconstruction of gradient.
+
+Plan (user: *measure first, then run*): **Step 1 = X10**, this commit. Step 2 =
+one run with `redshift_loss_weight 1.0→0.3` + codebook-aware (Hamming-neighbor)
+soft labels for spectrum tokens — the spectrum analog of the soft-redshift win.
+
+### X10 — the X4-for-spectrum
+
+`src/eval/spectrum_metrics.py` (torch-only, CPU/notebook-safe): decode the
+transformer's predicted *masked* tokens back through tokenizer v2 and score the
+flux against the observation, inverse-variance weighted —
+
+    χ²/pixel = mean_valid[ ivar·(flux_pred − flux_obs)² ]   (1.0 = noise floor)
+    ivar-R²  = 1 − Σ ivar·resid² / Σ ivar·(flux_obs − ȳ_w)²
+
+Sufficient statistics {Sw, Swy, Swy2, Swr2, n} accumulate additively across
+batches (`recon_weighted_sums`/`add_sums`/`finalize_recon`). `token_mask_to_
+pixel_mask` expands the per-token mask (B,272) → per-pixel (B,8704) via the exact
+stride-32 mapping (8704/272), so reconstruction is scored on the masked-token
+pixel blocks (the blind number mirroring `masked_spec_acc`).
+
+`nersc/eval_spectrum.py` (on-the-fly path; needs `--tokenizer-ckpt` — the cached
+token path stores no flux/denorm) reports, honest regime (z hidden): masked-token
+acc (the misleading 0.27), the **codec-only ceiling** (decode true tokens, expect
+χ²≈1.0), and predicted reconstruction on masked blocks + all valid pixels. Subtle
+correctness point: the LFQ (en|de)coder uses 2-D `(B, n_tokens)` index tensors
+(it sums over the 10-bit dim), and `decode` needs the per-spectrum `denorm` from
+`encode` — both handled.
+
+Tests `tests/test_spectrum_metrics.py` (8, all green; full suite 241 pass, only
+the pre-existing wandb-key env test fails): perfect→χ²0/R²1, noise-floor residual
+→χ²≈1, zero-istd/out-of-coverage pixels excluded, token→pixel mask, pixel-mask
+restriction, additive accumulation, NaN-safe empty. **Next: run `eval_spectrum.py`
+on `aqxmwgl1` `best.pt` to read the real flux-R²/χ² and decide whether 0.27 hides
+good reconstruction — then launch the rebalanced + soft-spectrum-label run.**
