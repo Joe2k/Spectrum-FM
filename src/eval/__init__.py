@@ -8,6 +8,7 @@ from src.eval.redshift_metrics import (
     redshift_metrics,
 )
 from src.eval.redshift_uncertainty import (
+    DEFAULT_REJECTION_SCORE,
     coverage_quality_curve,
     outlier_auroc,
     pit_calibration_error,
@@ -22,6 +23,7 @@ __all__ = [
     "decode_redshift",
     "redshift_bin_centers",
     "redshift_metrics",
+    "DEFAULT_REJECTION_SCORE",
     "coverage_quality_curve",
     "outlier_auroc",
     "pit_calibration_error",

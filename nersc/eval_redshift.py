@@ -46,6 +46,7 @@ sys.path.insert(0, str(HERE))
 
 from src.eval.redshift_metrics import CATASTROPHIC_DZ  # noqa: E402
 from src.eval.redshift_uncertainty import (  # noqa: E402
+    DEFAULT_REJECTION_SCORE,
     coverage_quality_curve,
     outlier_auroc,
     pit_calibration_error,
@@ -191,9 +192,9 @@ def _report_uncertainty(v, args):
     dz = (z_pred - z_true) / (1.0 + z_true)
     is_outlier = dz.abs() > CATASTROPHIC_DZ
 
-    print("\n  Reject most-uncertain by posterior entropy:")
+    print(f"\n  Reject most-uncertain by {DEFAULT_REJECTION_SCORE}:")
     print(f"  {'retained':>9} {'σ_NMAD':>10} {'η>.0033':>9} {'η>.05':>8} {'n':>7}")
-    for r in coverage_quality_curve(z_pred, z_true, scores["entropy"]):
+    for r in coverage_quality_curve(z_pred, z_true, scores[DEFAULT_REJECTION_SCORE]):
         print(f"  {r['retained_frac']*100:8.0f}% {r['sigma_nmad']:10.6f} "
               f"{r['outlier_frac']*100:8.2f}% {r['outlier_frac_05']*100:7.2f}% "
               f"{r['n']:7d}")

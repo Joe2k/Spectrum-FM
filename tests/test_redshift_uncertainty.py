@@ -9,6 +9,7 @@ import math
 import torch
 
 from src.eval.redshift_uncertainty import (
+    DEFAULT_REJECTION_SCORE,
     coverage_quality_curve,
     outlier_auroc,
     pit_calibration_error,
@@ -17,6 +18,12 @@ from src.eval.redshift_uncertainty import (
     uncertainty_scores,
 )
 from src.tokenizers.redshift import RedshiftTokenizer
+
+
+def test_default_rejection_score_is_a_real_score():
+    tok = _fitted_tok(n_levels=64)
+    probs = torch.softmax(torch.randn(4, tok.n_levels), dim=-1)
+    assert DEFAULT_REJECTION_SCORE in uncertainty_scores(probs, tok)
 
 
 def _fitted_tok(n_levels=256, seed=0):

@@ -34,6 +34,12 @@ from src.eval.redshift_metrics import (
 
 DEFAULT_COVERAGE = (1.0, 0.95, 0.9, 0.8, 0.7, 0.5)
 
+# Rejection score chosen by held-out outlier-detection AUROC (2026-06-18 eval):
+# posterior_std_z separates catastrophic outliers far better than entropy —
+# AUROC 0.976 (4096-soft) / 0.932 (512-hard) vs entropy 0.846 / 0.590. With a
+# 10% std cut the 4096-soft model reaches η>0.0033 = 0.69% @ σ_NMAD 5.3e-4.
+DEFAULT_REJECTION_SCORE = "posterior_std_z"
+
 
 def redshift_posterior(red_logits: torch.Tensor, z_tok) -> torch.Tensor:
     """Softmax over the redshift sub-vocab → posterior probs (..., n_bins)."""

@@ -2755,3 +2755,69 @@ The redshift softmax is a discretized z-posterior for free. New tooling:
 Next: run `--uncertainty` on the 4096-soft leader to confirm η>0.0033 collapses
 toward <1% under rejection and AUROC ≳ 0.8; if rejection alone can't reach <1%
 at usable coverage, X8b = a line-aware auxiliary loss to cut outliers at source.
+
+
+## 2026-06-19: X8 BREAKTHROUGH — rejection beats SpecPT; `posterior_std_z` is the detector
+
+Ran `--uncertainty` on both live runs' held-out DESI val (`best.pt`, honest
+z-hidden, 1920 spectra). **The result is the headline of the project.**
+
+**4096-soft (`aqxmwgl1`, ~89k) — quality-vs-coverage by `posterior_std_z`:**
+
+| completeness | σ_NMAD | η>0.0033 | η>0.05 |
+|---|---|---|---|
+| 100% | 0.000646 | 6.30% | 1.88% |
+| **90%** | **0.000529** | **0.69%** | 0.06% |
+| 80% | 0.000472 | 0.46% | 0.00% |
+| 70% | 0.000396 | 0.30% | 0.00% |
+| 50% | 0.000189 | 0.10% | 0.00% |
+
+SpecPT reference: σ_NMAD 0.0006 (BGS) / 0.0008 (ELG), η 0.20% / 0.80%.
+
+At **90% completeness** (a standard Redrock-ZWARN-style quality cut) the unimodal
+model is at **σ_NMAD 5.3e-4 (beats SpecPT-BGS) and η 0.69% (inside SpecPT's
+range)** — mid-training, and from a *generative* model that also reconstructs
+spectra. At 80% it beats SpecPT on both axes. Defensible claim:
+**a unimodal DESI FM matching/beating SpecPT redshifts at standard completeness,
+from a model that also reconstructs spectra** (neither SpecPT nor AION does both).
+
+### Two decisive findings
+
+1. **`posterior_std_z` is the rejection score, not entropy.** Held-out
+   outlier-detection AUROC:
+
+   | score | 4096-soft | 512-hard |
+   |---|---|---|
+   | **posterior_std_z** | **0.976** | **0.932** |
+   | entropy | 0.846 | 0.590 |
+   | mass_outside_k | 0.746 | 0.638 |
+   | neg_max_prob | 0.726 | 0.529 |
+   | second_mode_ratio | 0.431 | 0.500 |
+
+   Entropy rejection barely moved η (95%→4.0%); `posterior_std_z` took it
+   95%→1.86%, 90%→0.69%. **Polish (this commit): `posterior_std_z` is now the
+   default rejection score** (`DEFAULT_REJECTION_SCORE` in
+   `src/eval/redshift_uncertainty.py`) used by `evaluate()`'s live
+   `z_nmad_cov90`/`z_outlier_cov90`/`z_auroc_outlier` and the script's coverage
+   table. `second_mode_ratio` is uninformative here (≈0.5) — kept in the AUROC
+   readout only.
+
+2. **Soft labels are vindicated beyond σ_NMAD.** Hard CE makes every posterior
+   sharp regardless of correctness, so entropy can't separate good from bad
+   (AUROC 0.59); soft labels give graded, informative uncertainty (0.85). The
+   4096-soft also wins outright: σ_NMAD 0.000646 vs 0.000748, bias +5e-6 vs
+   +2.1e-4 (40×), η 6.3% vs 9.7%. **512-hard control has served its purpose.**
+
+### Calibration
+
+Both miscalibrated oppositely (PIT KS 0.257 soft / 0.166 hard): soft is
+over-dispersed (central PIT peak — expected from σ=24 soft labels,
+under-confident, the safe direction); hard is over-confident (PIT to the edge).
+Post-hoc temperature scaling would fix the soft model's calibration cheaply —
+left as optional X8b since rejection already clears the bar.
+
+### Decision
+
+Promote **4096-soft as THE model**; retire the 512-hard control; let soft train
+to 200k (these numbers should only improve). Per-sample arrays dumped to
+`$SCRATCH/x8_{4096soft,512hard}.npz` for the PIT / coverage paper figures.

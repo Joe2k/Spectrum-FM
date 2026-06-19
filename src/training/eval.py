@@ -24,6 +24,7 @@ from src.eval.redshift_metrics import (
     redshift_metrics,
 )
 from src.eval.redshift_uncertainty import (
+    DEFAULT_REJECTION_SCORE,
     coverage_quality_curve,
     outlier_auroc,
     pit_calibration_error,
@@ -161,12 +162,13 @@ def evaluate(
     out["z_bias"] = me["bias"]
     out["z_nmad_argmax"] = ma["sigma_nmad"]
 
-    # Uncertainty / calibration scalars (X8). The z-posterior entropy is the
-    # rejection score; report how σ_NMAD/outliers improve at 90% coverage, how
-    # well entropy separates catastrophic outliers (AUROC), and PIT calibration.
+    # Uncertainty / calibration scalars (X8). posterior_std_z is the rejection
+    # score (best held-out outlier AUROC); report how σ_NMAD/outliers improve at
+    # 90% coverage, how well it separates catastrophic outliers (AUROC), and PIT
+    # calibration.
     scores = {k: torch.cat([b[k] for b in scores_batches])
               for k in scores_batches[0]}
-    score = scores["entropy"]
+    score = scores[DEFAULT_REJECTION_SCORE]
     pit = torch.cat(pit_all)
     dz = (z_pred - z_true) / (1.0 + z_true)
     is_outlier = dz.abs() > CATASTROPHIC_DZ
