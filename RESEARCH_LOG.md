@@ -4,6 +4,31 @@ Living document of findings, decisions, and experimental results.
 
 ---
 
+## Canonical paths & locations  (KEEP UPDATED — record every file/folder path here)
+
+**Local repo (mac):** `/Users/jonathansamuel/projects/cs-686-dl/FoundationModel`
+**Remote:** `spectrum-fm` = `git@github.com:Joe2k/Spectrum-FM.git` (push branch `main`)
+**NERSC repo:** `$HOME/Spectrum-FM` = `/global/u1/j/joe2k/Spectrum-FM`
+**W&B:** entity `jjayaseelan-university-of-san-francisco`, project `redshifty`
+
+**NERSC scratch** (`$SCRATCH` = `/pscratch/sd/j/joe2k`):
+- Manifest: `$SCRATCH/manifests/dr1_v2_full.jsonl`
+- X1 token cache (v2 tokens): `$SCRATCH/dr1_tokenized_v2`
+- Transformer checkpoints: `$SCRATCH/deepsrch/checkpoints/<run_name>/{best,last}.pt`
+- Spectrum tokenizer v2: `$SCRATCH/deepsrch/checkpoints/tokenizer_v2_3k_v3/`
+  (`final.pt` = released frozen @80k; also `best.pt`, `last.pt`, `config.json`, `metrics.jsonl`)
+- CFS mirror (training `--cfs-out`): `/global/cfs/cdirs/deepsrch/$USER/checkpoints/<run_name>`
+- Eval dumps: `$SCRATCH/x8_{4096soft,512hard}.npz`, `$SCRATCH/x8b_4096soft_caltemp.npz`
+
+**Release checkpoints (in-repo):** `checkpoints/release/` — incl.
+`spectrum_tokenizer_v2/best.pt`, `approach_a_fm_v1_10k_a_ddp4_redmask50_v9/` (v9, v1 tokens).
+
+**Runs:**
+- 4096-soft = THE model: run `approach_a_v2cache_x2x3_ddp4`, W&B `aqxmwgl1` (finished 200k)
+- 512-hard control: run `approach_a_v2cache_x2_512hard_ctrl_ddp4`, W&B `cd1ikb99`
+
+---
+
 ## 2026-05-05: Project Kickoff & Architecture Planning
 
 ### Assignment Requirements (from PHYS303_Final-Project_2026.pdf)
@@ -2999,6 +3024,41 @@ correctness point: the LFQ (en|de)coder uses 2-D `(B, n_tokens)` index tensors
 Tests `tests/test_spectrum_metrics.py` (8, all green; full suite 241 pass, only
 the pre-existing wandb-key env test fails): perfect→χ²0/R²1, noise-floor residual
 →χ²≈1, zero-istd/out-of-coverage pixels excluded, token→pixel mask, pixel-mask
-restriction, additive accumulation, NaN-safe empty. **Next: run `eval_spectrum.py`
-on `aqxmwgl1` `best.pt` to read the real flux-R²/χ² and decide whether 0.27 hides
-good reconstruction — then launch the rebalanced + soft-spectrum-label run.**
+restriction, additive accumulation, NaN-safe empty.
+
+### X10 RESULT — spectrum is essentially solved; 0.27 was a red herring
+
+`eval_spectrum.py` on `aqxmwgl1` `best.pt` (2000 held-out spectra, 50% mask, z
+hidden; tokenizer `$SCRATCH/deepsrch/checkpoints/tokenizer_v2_3k_v3/final.pt`):
+
+| | masked-token acc | χ²/pixel | ivar-R² |
+|---|---|---|---|
+| (the misleading number) | **0.273** | — | — |
+| codec ceiling (true tokens, all px) | — | 1.156 | 0.9979 |
+| **predicted (masked blocks)** | — | **1.328** | **0.9976** |
+| predicted (all px) | — | 1.283 | 0.9976 |
+
+**Exactly the redshift story repeated.** Token top-1 of 0.27 hides a *blind*
+reconstruction at **ivar-R² 0.9976 / χ²/pixel 1.328** — within DESI's own noise,
+and the transformer adds only Δχ² ≈ 0.17 over the codec's own ceiling (1.156).
+The model infers 50%-masked spectral regions almost as well as the codec
+reconstructs the visible ones. **Spectrum accuracy is not a problem** — like
+redshift bin-acc, the discrete-token metric was the wrong yardstick.
+
+**Decision — Step 2 (rebalance + soft spectrum labels) is NOT worth running.**
+Both axes are now at/near their floors in-distribution: redshift σ_NMAD beats
+SpecPT, spectrum R² 0.998. Pouring gradient into a Δχ²≈0.17 gap is the same
+low-ROI trap as more redshift steps at the LR floor. measure-first did its job:
+it told us *not* to burn the GPUs on that experiment.
+
+**Real next move = X9 OOD generalization to SDSS** — the explicit project goal
+("beat AION/SpecPT incl. out-of-sample") and the only place with real headroom
++ paper value. We now have the *complete* tooling to measure it: redshift σ_NMAD
++ rejection (`posterior_std_z`) + calibration (X8c) AND flux-space reconstruction
+(X10) — all torch-only and notebook-importable. Apply them to SDSS (never seen in
+training). If OOD holds, that's the headline; if it degrades, *that* degradation
+defines the one justified GPU run (e.g. flux-domain augmentation / robustness).
+The only meaningful in-distribution GPU lever left is a lower codec floor
+(tokenizer v3) — a big effort for ~0.16 χ², not warranted now.
+
+Paths used recorded in the **Canonical paths** section at the top.
