@@ -2934,3 +2934,18 @@ X8c supplies calibrated PIT / credible intervals for the writeup without touchin
 either. Per-sample arrays + recal knots dumped to
 `$SCRATCH/x8b_4096soft_caltemp.npz`. Possible X8d: same posterior tooling on the
 SDSS OOD check (notebook import).
+
+### X8c confirmed on the real model + recommendation-logic fix
+
+Ran `--uncertainty` on `aqxmwgl1` final `best.pt` (1600 held-out spectra). X8c on
+the *actual* PIT: **held-out KS 0.3002 → 0.0263**, histogram flat
+(`145 164 157 168 162 168 147 180 153 156` ≈ uniform). Confirms the synthetic
+result — the posterior is calibrated at no cost to predictions or rejection.
+
+Also fixed a misleading hint: the X8b `--uncertainty` "bake T" recommendation
+only checked PIT KS, so on this run it printed `-> bake T=0.250` even though
+temperature *helped* PIT (0.29→0.23) while *cratering* rejection (`posterior_std_z`
+AUROC 0.985→0.860). The recommendation now keys off the **rejection AUROC** (the
+metric we ship): if T degrades it (or doesn't help PIT) it prints *keep
+`redshift_temperature=1.0`; use X8c recalibration* instead. So the tool's advice
+now matches the documented verdict.
