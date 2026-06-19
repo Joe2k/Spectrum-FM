@@ -10,8 +10,10 @@ import torch
 
 from src.eval.redshift_uncertainty import (
     DEFAULT_REJECTION_SCORE,
+    apply_pit_recalibration,
     apply_temperature,
     coverage_quality_curve,
+    fit_pit_recalibrator,
     fit_temperature,
     outlier_auroc,
     pit_calibration_error,
@@ -196,3 +198,38 @@ def test_fit_temperature_near_one_when_calibrated():
     tok, probs, z_true = _calibration_setup(gen_sigma=3.0, model_sigma=3.0)
     T = fit_temperature(probs, z_true, tok)
     assert 0.7 < T < 1.4
+
+
+# --------------------------------------------------------------------------- #
+# fit_pit_recalibrator / apply_pit_recalibration (X8c)
+# --------------------------------------------------------------------------- #
+def test_pit_recalibration_makes_uniform_and_is_monotone():
+    g = torch.Generator().manual_seed(11)
+    # Over-dispersed PIT (mass concentrated mid-range), like the soft model.
+    pit = torch.rand(4000, generator=g) * 0.4 + 0.3
+    knots = fit_pit_recalibrator(pit)
+    rc = apply_pit_recalibration(pit, knots)
+    assert pit_calibration_error(rc) < pit_calibration_error(pit)
+    assert pit_calibration_error(rc) < 0.05            # in-sample → ~uniform
+    # The map is monotone non-decreasing in its input.
+    xs = torch.linspace(0.0, 1.0, 200)
+    ys = apply_pit_recalibration(xs, knots)
+    assert torch.all(ys[1:] >= ys[:-1] - 1e-6)
+
+
+def test_pit_recalibration_generalises_to_held_out():
+    g = torch.Generator().manual_seed(12)
+    cal = torch.rand(4000, generator=g) * 0.4 + 0.3   # two independent draws of
+    test = torch.rand(4000, generator=g) * 0.4 + 0.3  # the same miscalibration
+    knots = fit_pit_recalibrator(cal)
+    ks_before = pit_calibration_error(test)
+    ks_after = pit_calibration_error(apply_pit_recalibration(test, knots))
+    assert ks_after < ks_before
+    assert ks_after < 0.1
+
+
+def test_pit_recalibration_keeps_uniform_uniform():
+    g = torch.Generator().manual_seed(13)
+    u = torch.rand(5000, generator=g)                 # already calibrated
+    knots = fit_pit_recalibrator(u)
+    assert pit_calibration_error(apply_pit_recalibration(u, knots)) < 0.05

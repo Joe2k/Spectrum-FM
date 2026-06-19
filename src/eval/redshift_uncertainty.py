@@ -249,3 +249,38 @@ def pit_histogram(pit: torch.Tensor, bins: int = 10) -> torch.Tensor:
     pit = pit.flatten().float().clamp(0.0, 1.0 - 1e-7)
     idx = (pit * bins).long().clamp(0, bins - 1)
     return torch.bincount(idx, minlength=bins)
+
+
+def fit_pit_recalibrator(pit_cal: torch.Tensor) -> torch.Tensor:
+    """Fit a monotone PIT recalibration map (Kuleshov et al. 2018) on a
+    calibration set.
+
+    X8b showed a single temperature is the wrong instrument for this
+    soft-labelled posterior: the σ=24-bin soft labels make it *over-dispersed by
+    design* (central-peaked PIT), so NLL-temperature only sharpens to the search
+    floor — barely helping PIT while destroying the `posterior_std_z` rejection
+    that is the whole result. The fix is a monotone remap of the PIT itself: its
+    empirical CDF, which for this objective IS the isotonic-regression solution.
+
+    Because the map acts on PIT (not on the rejection score), the point
+    predictions, σ_NMAD and the outlier-rejection ranking are **unchanged** — it
+    fixes absolute calibration without the accuracy/rejection trade-off.
+
+    Returns the sorted calibration PITs (the ECDF knots); pass to
+    :func:`apply_pit_recalibration`. Fit on a split disjoint from the one you
+    score, or it is trivially perfect.
+    """
+    return torch.sort(pit_cal.flatten().float()).values
+
+
+def apply_pit_recalibration(pit: torch.Tensor, knots: torch.Tensor) -> torch.Tensor:
+    """Map PIT values through a fitted calibration ECDF (monotone
+    non-decreasing, [0,1] → [0,1]). A calibrated posterior ⇒ recalibrated
+    PIT ~ Uniform(0,1)."""
+    pit = pit.flatten().float().contiguous()
+    n = int(knots.numel())
+    if n == 0:
+        return pit
+    # ECDF: P(cal ≤ t) = (#knots ≤ t) / n.
+    idx = torch.searchsorted(knots.contiguous(), pit, right=True)
+    return (idx.float() / n).clamp(0.0, 1.0)

@@ -47,8 +47,10 @@ sys.path.insert(0, str(HERE))
 from src.eval.redshift_metrics import CATASTROPHIC_DZ  # noqa: E402
 from src.eval.redshift_uncertainty import (  # noqa: E402
     DEFAULT_REJECTION_SCORE,
+    apply_pit_recalibration,
     apply_temperature,
     coverage_quality_curve,
+    fit_pit_recalibrator,
     fit_temperature,
     outlier_auroc,
     pit_calibration_error,
@@ -245,14 +247,37 @@ def _report_uncertainty(v, args, z_tok):
     print(f"\n  Calibrated outlier-detection AUROC (η>{CATASTROPHIC_DZ}):")
     for name, s in scores_T.items():
         print(f"    {name:18s}: {outlier_auroc(s, is_outlier):.4f}")
-    print(f"\n  -> bake T={T:.3f} into eval/train via "
-          f"`evaluate(..., redshift_temperature={T:.3f})`")
+    if ks_T >= ks:
+        print(f"  -> temperature did NOT help; keep redshift_temperature=1.0")
+    else:
+        print(f"  -> bake T={T:.3f} into eval/train via "
+              f"`evaluate(..., redshift_temperature={T:.3f})`")
+
+    # ---- X8c: isotonic PIT recalibration (monotone; rejection untouched) ----
+    pit_flat = pit.flatten()
+    nps = pit_flat.numel()
+    fit_idx = torch.arange(0, nps, 2)   # honest held-out split: fit on evens,
+    ev_idx = torch.arange(1, nps, 2)    # score KS on odds
+    knots = fit_pit_recalibrator(pit_flat[fit_idx])
+    ks_ev_raw = pit_calibration_error(pit_flat[ev_idx])
+    ks_ev_rc = pit_calibration_error(apply_pit_recalibration(pit_flat[ev_idx], knots))
+    pit_rc = apply_pit_recalibration(pit_flat, knots)
+    bars_rc = " ".join(f"{int(c)}" for c in pit_histogram(pit_rc, bins=10))
+
+    print("\n" + "-" * 56)
+    print("  X8c isotonic PIT recalibration  (monotone; rejection unchanged)")
+    print("-" * 56)
+    print(f"  held-out PIT KS  {ks_ev_raw:.4f}  ->  {ks_ev_rc:.4f}   "
+          f"({'better' if ks_ev_rc < ks_ev_raw else 'worse'})")
+    print(f"  PIT histogram (10) : {bars_rc}")
+    print("  (the posterior_std_z rejection table above is unchanged by design)")
 
     if args.dump_npz is not None:
         import numpy as np
         np.savez(
             args.dump_npz,
             dz=dz.numpy(), pit=pit.numpy(), pit_caltemp=pit_T.numpy(),
+            pit_recal=pit_rc.numpy(), recal_knots=knots.numpy(),
             temperature=np.array(T), is_outlier=is_outlier.numpy(),
             **{f"score_{k}": s.numpy() for k, s in scores.items()},
             **{f"score_caltemp_{k}": s.numpy() for k, s in scores_T.items()},

@@ -9,8 +9,10 @@ from src.eval.redshift_metrics import (
 )
 from src.eval.redshift_uncertainty import (
     DEFAULT_REJECTION_SCORE,
+    apply_pit_recalibration,
     apply_temperature,
     coverage_quality_curve,
+    fit_pit_recalibrator,
     fit_temperature,
     outlier_auroc,
     pit_calibration_error,
@@ -26,8 +28,10 @@ __all__ = [
     "redshift_bin_centers",
     "redshift_metrics",
     "DEFAULT_REJECTION_SCORE",
+    "apply_pit_recalibration",
     "apply_temperature",
     "coverage_quality_curve",
+    "fit_pit_recalibrator",
     "fit_temperature",
     "outlier_auroc",
     "pit_calibration_error",
