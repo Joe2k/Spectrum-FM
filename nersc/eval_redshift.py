@@ -47,10 +47,14 @@ sys.path.insert(0, str(HERE))
 from src.eval.redshift_metrics import CATASTROPHIC_DZ  # noqa: E402
 from src.eval.redshift_uncertainty import (  # noqa: E402
     DEFAULT_REJECTION_SCORE,
+    apply_temperature,
     coverage_quality_curve,
+    fit_temperature,
     outlier_auroc,
     pit_calibration_error,
     pit_histogram,
+    pit_values,
+    uncertainty_scores,
 )
 from src.inference.release import _infer_transformer_dims, _restore_z_tokenizer  # noqa: E402
 from src.models.transformer import SpectrumTransformer  # noqa: E402
@@ -97,6 +101,10 @@ def parse_args():
     p.add_argument("--uncertainty", action="store_true",
                    help="Also report the quality-vs-coverage curve, outlier-"
                         "detection AUROC per score, and PIT calibration.")
+    p.add_argument("--temperature", type=float, default=None,
+                   help="With --uncertainty: temperature for the calibrated "
+                        "posterior. Default None = fit T on this val split "
+                        "(X8b); pass a value to apply a known T instead.")
     p.add_argument("--dump-npz", type=Path, default=None,
                    help="With --uncertainty: write per-sample dz/scores/pit "
                         "to this .npz for notebook plotting.")
@@ -182,22 +190,27 @@ def main():
     print("=" * 56)
 
     if args.uncertainty:
-        _report_uncertainty(v, args)
+        _report_uncertainty(v, args, z_tok)
 
 
-def _report_uncertainty(v, args):
-    """Coverage curve + per-score outlier AUROC + PIT calibration (X8)."""
+def _coverage_table(z_pred, z_true, score):
+    print(f"  {'retained':>9} {'σ_NMAD':>10} {'η>.0033':>9} {'η>.05':>8} {'n':>7}")
+    for r in coverage_quality_curve(z_pred, z_true, score):
+        print(f"  {r['retained_frac']*100:8.0f}% {r['sigma_nmad']:10.6f} "
+              f"{r['outlier_frac']*100:8.2f}% {r['outlier_frac_05']*100:7.2f}% "
+              f"{r['n']:7d}")
+
+
+def _report_uncertainty(v, args, z_tok):
+    """Coverage curve + per-score outlier AUROC + PIT calibration (X8) and the
+    X8b temperature-calibration step (fit/apply T, before→after PIT)."""
     z_pred, z_true = v["z_pred"], v["z_true"]
-    scores, pit = v["scores"], v["pit"]
+    scores, pit, probs = v["scores"], v["pit"], v["probs"]
     dz = (z_pred - z_true) / (1.0 + z_true)
     is_outlier = dz.abs() > CATASTROPHIC_DZ
 
     print(f"\n  Reject most-uncertain by {DEFAULT_REJECTION_SCORE}:")
-    print(f"  {'retained':>9} {'σ_NMAD':>10} {'η>.0033':>9} {'η>.05':>8} {'n':>7}")
-    for r in coverage_quality_curve(z_pred, z_true, scores[DEFAULT_REJECTION_SCORE]):
-        print(f"  {r['retained_frac']*100:8.0f}% {r['sigma_nmad']:10.6f} "
-              f"{r['outlier_frac']*100:8.2f}% {r['outlier_frac_05']*100:7.2f}% "
-              f"{r['n']:7d}")
+    _coverage_table(z_pred, z_true, scores[DEFAULT_REJECTION_SCORE])
 
     print(f"\n  Outlier-detection AUROC (η>{CATASTROPHIC_DZ}):")
     for name, s in scores.items():
@@ -209,13 +222,40 @@ def _report_uncertainty(v, args):
     print(f"\n  PIT calibration KS : {ks:.4f}  (0 = uniform = calibrated)")
     print(f"  PIT histogram (10) : {bars}")
 
+    # ---- X8b: temperature calibration -------------------------------------
+    if args.temperature is not None:
+        T = args.temperature
+        how = "applied"
+    else:
+        T = fit_temperature(probs, z_true, z_tok)
+        how = "fitted on this val split"
+    probs_T = apply_temperature(probs, T)
+    pit_T = pit_values(probs_T, z_true, z_tok)
+    scores_T = uncertainty_scores(probs_T, z_tok)
+    ks_T = pit_calibration_error(pit_T)
+    bars_T = " ".join(f"{int(c)}" for c in pit_histogram(pit_T, bins=10))
+
+    print("\n" + "-" * 56)
+    print(f"  X8b temperature calibration  (T = {T:.3f}, {how})")
+    print("-" * 56)
+    print(f"  PIT KS  {ks:.4f}  ->  {ks_T:.4f}   ({'better' if ks_T < ks else 'worse'})")
+    print(f"  PIT histogram (10) : {bars_T}")
+    print(f"\n  Calibrated reject by {DEFAULT_REJECTION_SCORE}:")
+    _coverage_table(z_pred, z_true, scores_T[DEFAULT_REJECTION_SCORE])
+    print(f"\n  Calibrated outlier-detection AUROC (η>{CATASTROPHIC_DZ}):")
+    for name, s in scores_T.items():
+        print(f"    {name:18s}: {outlier_auroc(s, is_outlier):.4f}")
+    print(f"\n  -> bake T={T:.3f} into eval/train via "
+          f"`evaluate(..., redshift_temperature={T:.3f})`")
+
     if args.dump_npz is not None:
         import numpy as np
         np.savez(
             args.dump_npz,
-            dz=dz.numpy(), pit=pit.numpy(),
-            is_outlier=is_outlier.numpy(),
+            dz=dz.numpy(), pit=pit.numpy(), pit_caltemp=pit_T.numpy(),
+            temperature=np.array(T), is_outlier=is_outlier.numpy(),
             **{f"score_{k}": s.numpy() for k, s in scores.items()},
+            **{f"score_caltemp_{k}": s.numpy() for k, s in scores_T.items()},
         )
         print(f"\n  per-sample arrays -> {args.dump_npz}")
 

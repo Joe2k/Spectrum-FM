@@ -10,7 +10,9 @@ import torch
 
 from src.eval.redshift_uncertainty import (
     DEFAULT_REJECTION_SCORE,
+    apply_temperature,
     coverage_quality_curve,
+    fit_temperature,
     outlier_auroc,
     pit_calibration_error,
     pit_histogram,
@@ -149,3 +151,48 @@ def test_auroc_perfect_reversed_random():
 def test_auroc_empty_class_is_half():
     score = torch.rand(50)
     assert outlier_auroc(score, torch.zeros(50, dtype=torch.bool)) == 0.5
+
+
+# --------------------------------------------------------------------------- #
+# fit_temperature / apply_temperature (X8b)
+# --------------------------------------------------------------------------- #
+def _calibration_setup(gen_sigma, model_sigma, n_levels=256, n=4000, seed=7):
+    """Truth drawn from a Gaussian posterior of width `gen_sigma`; the model
+    reports width `model_sigma`. model_sigma < gen_sigma ⇒ over-confident."""
+    tok = _fitted_tok(n_levels=n_levels)
+    g = torch.Generator().manual_seed(seed)
+    centers = torch.randint(40, n_levels - 40, (n,), generator=g).float()
+    gen = _gauss_probs(centers, sigma=gen_sigma, n=n_levels)
+    true_bin = torch.multinomial(gen, 1, generator=g).squeeze(1)
+    z_true = tok.decode(true_bin).float()
+    model_probs = _gauss_probs(centers, sigma=model_sigma, n=n_levels)
+    return tok, model_probs, z_true
+
+
+def test_apply_temperature_softens_and_is_identity_at_one():
+    tok = _fitted_tok(n_levels=128)
+    probs = torch.softmax(torch.randn(16, tok.n_levels), dim=-1)
+    assert torch.allclose(apply_temperature(probs, 1.0), probs, atol=1e-6)
+    hot = apply_temperature(probs, 4.0)
+    ent = -(probs * (probs + 1e-12).log()).sum(-1)
+    ent_hot = -(hot * (hot + 1e-12).log()).sum(-1)
+    assert torch.all(ent_hot > ent)  # higher T ⇒ more entropy
+    assert torch.allclose(hot.sum(-1), torch.ones(16), atol=1e-5)
+
+
+def test_fit_temperature_softens_overconfident():
+    # Model is too sharp (sigma 1) vs the generative spread (sigma 4).
+    tok, probs, z_true = _calibration_setup(gen_sigma=4.0, model_sigma=1.0)
+    T = fit_temperature(probs, z_true, tok)
+    assert T > 1.5  # must soften
+    ks_before = pit_calibration_error(pit_values(probs, z_true, tok))
+    ks_after = pit_calibration_error(
+        pit_values(apply_temperature(probs, T), z_true, tok))
+    assert ks_after < ks_before
+
+
+def test_fit_temperature_near_one_when_calibrated():
+    # Model width matches the generative width ⇒ already calibrated ⇒ T ≈ 1.
+    tok, probs, z_true = _calibration_setup(gen_sigma=3.0, model_sigma=3.0)
+    T = fit_temperature(probs, z_true, tok)
+    assert 0.7 < T < 1.4

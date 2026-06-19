@@ -25,6 +25,7 @@ from src.eval.redshift_metrics import (
 )
 from src.eval.redshift_uncertainty import (
     DEFAULT_REJECTION_SCORE,
+    apply_temperature,
     coverage_quality_curve,
     outlier_auroc,
     pit_calibration_error,
@@ -59,6 +60,7 @@ def evaluate(
     encoder_mask_ratio: float = 0.0,
     redshift_mask_ratio: float = 0.0,
     redshift_soft_sigma: float = 0.0,
+    redshift_temperature: float = 1.0,
     max_batches: int = 50,
     amp_dtype: torch.dtype = torch.float16,
     return_per_sample: bool = False,
@@ -71,10 +73,13 @@ def evaluate(
 
     Always reports physical redshift metrics (σ_NMAD, outliers, bias) and
     uncertainty-rejection scalars (`z_auroc_outlier`, `z_nmad_cov90`,
-    `z_outlier_cov90`, `z_pit_ks`). With `return_per_sample=True` the dict also
-    carries the per-sample arrays (`z_pred`, `z_true`, `score`, `pit`) for
-    offline coverage/calibration analysis — omitted by default to keep the
-    in-training val cheap.
+    `z_outlier_cov90`, `z_pit_ks`). `redshift_temperature` (X8b) scales the
+    calibration posterior — the point predictions / σ_NMAD are unchanged
+    (temperature is monotone in the logits), only the uncertainty scores, PIT
+    and `z_pit_ks` move; pass a fitted T to log calibrated uncertainty live.
+    With `return_per_sample=True` the dict also carries the per-sample arrays
+    (`z_pred`, `z_true`, `score`, `pit`, and the T=1 `probs` for offline
+    temperature fitting) — omitted by default to keep the in-training val cheap.
     """
     model.eval()
     losses = 0.0
@@ -90,8 +95,9 @@ def evaluate(
     # and compare against the *true continuous* z from the raw batch.
     z_pred_exp, z_pred_arg, z_true_all = [], [], []
     # Uncertainty scores (per-sample dict) + PIT, for rejection + calibration.
-    # Accumulated per batch, concatenated after the loop.
-    scores_batches, pit_all = [], []
+    # Accumulated per batch, concatenated after the loop. `probs_all` keeps the
+    # T=1 posterior so the offline analysis can fit a temperature (X8b).
+    scores_batches, pit_all, probs_all = [], [], []
     for i, raw in enumerate(loader):
         if raw is None:
             continue
@@ -125,9 +131,14 @@ def evaluate(
         zt = raw["z"].detach().flatten().cpu().float()
         z_true_all.append(zt)
         # Uncertainty scores from the z-posterior + PIT (posterior CDF at truth).
+        # Keep the T=1 posterior for offline temperature fitting; score/PIT use
+        # the (optionally) temperature-scaled posterior.
         probs = redshift_posterior(red_logits, z_tok).cpu()
-        scores_batches.append(uncertainty_scores(probs, z_tok))
-        pit_all.append(pit_values(probs, zt, z_tok))
+        probs_cal = apply_temperature(probs, redshift_temperature)
+        scores_batches.append(uncertainty_scores(probs_cal, z_tok))
+        pit_all.append(pit_values(probs_cal, zt, z_tok))
+        if return_per_sample:
+            probs_all.append(probs)
         n += 1
 
     if n == 0:
@@ -183,6 +194,7 @@ def evaluate(
         out["z_true"] = z_true
         out["pit"] = pit
         out["scores"] = scores
+        out["probs"] = torch.cat(probs_all)  # T=1 posterior, for temperature fit
     return out
 
 

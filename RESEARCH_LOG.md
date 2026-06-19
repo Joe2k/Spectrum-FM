@@ -2821,3 +2821,59 @@ left as optional X8b since rejection already clears the bar.
 Promote **4096-soft as THE model**; retire the 512-hard control; let soft train
 to 200k (these numbers should only improve). Per-sample arrays dumped to
 `$SCRATCH/x8_{4096soft,512hard}.npz` for the PIT / coverage paper figures.
+
+---
+
+## 2026-06-19: 4096-soft finished 200k — and X8b temperature calibration
+
+### The run finished (not just crashed)
+
+`aqxmwgl1` was resumed onto the X8 code after its ~150k crash and ran cleanly to
+**200,000/200,000** (`state=finished`). The back half kept paying off — the live
+physical metrics improved well past the `val/loss_redshift` plateau that *looked*
+like saturation:
+
+| metric | 150k | **200k (final)** | SpecPT bar |
+|---|---|---|---|
+| σ_NMAD (expected) | 6.1e-4 | **4.6e-4** | 6–8e-4 |
+| σ_NMAD @ 90% cov | — | **3.6e-4** | — |
+| η>0.0033 (raw) | 11.4% | 9.3% | <1% |
+| η>0.0033 @ 90% cov | 3.5% | **1.7%** | — |
+| outlier AUROC | 0.974 | **0.980** | — |
+| bias | — | +1.3e-5 | ~0 |
+| **PIT KS** | — | **0.244** | →0 |
+
+Precision now comfortably beats SpecPT; bias ≈ 0; rejection (`posterior_std_z`)
+is excellent. The LR sat on its cosine floor (8e-5) through the back half, so a
+flat extension to 300k is low-ROI — the residual is the *raw* catastrophic
+outlier fraction (line-confusion / multimodal), which needs an objective/data
+change, not more steps. The cheap, high-value gap is the **PIT KS = 0.244**: the
+posterior is miscalibrated (over-dispersed from the σ=24 soft labels).
+
+### X8b — post-hoc temperature scaling
+
+A single scalar **T** (Guo et al. 2017) on the z sub-vocab logits, fit on the
+held-out val split by minimising NLL of the true z bin. Implementation:
+
+- `fit_temperature(probs, z_true, z_tok)` — golden-section on `log T` (NLL is
+  unimodal; derivative-free, CPU-safe, notebook-importable). **Fits from the T=1
+  posterior** — `softmax(log p / T)` equals `softmax(logits/T)` because the
+  per-row normalisation constant cancels (verified to 1e-9), so we never need to
+  store raw logits.
+- `apply_temperature(probs, T)` / `redshift_posterior(..., temperature=T)` —
+  re-temper a posterior. **Temperature is monotone in the logits ⇒ argmax and
+  the point prediction / σ_NMAD are unchanged**; only spread / PIT / uncertainty
+  scores move. So calibration is free of any accuracy cost.
+- `evaluate(..., redshift_temperature=T)` — once T is known, the live val logs
+  calibrated `z_pit_ks` (predictions untouched).
+- `nersc/eval_redshift.py --uncertainty` now fits/applies T and prints the
+  before→after PIT KS + histogram, the calibrated coverage table and AUROCs, and
+  the exact `redshift_temperature=` value to bake in. `--temperature` applies a
+  known T instead of fitting.
+
+Synthetic validation (sigma 1.5 model vs sigma 6 truth): fit recovers T≈7.4,
+PIT KS 0.35→0.08. Tests: `fit_temperature` softens an over-confident posterior
+(T>1.5, KS drops) and returns T≈1 when already calibrated; `apply_temperature`
+is identity at T=1 and raises entropy at T>1. `pytest tests/test_redshift_*` 20
+green. Next: run `--uncertainty` on `aqxmwgl1` final `best.pt` to read the real
+fitted T and the calibrated PIT KS, then bake it into the release eval.

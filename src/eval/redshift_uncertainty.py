@@ -20,6 +20,7 @@ SDSS OOD check) the same way as `redshift_metrics`.
 
 from __future__ import annotations
 
+import math
 from typing import Dict, List, Sequence
 
 import torch
@@ -41,9 +42,77 @@ DEFAULT_COVERAGE = (1.0, 0.95, 0.9, 0.8, 0.7, 0.5)
 DEFAULT_REJECTION_SCORE = "posterior_std_z"
 
 
-def redshift_posterior(red_logits: torch.Tensor, z_tok) -> torch.Tensor:
-    """Softmax over the redshift sub-vocab → posterior probs (..., n_bins)."""
-    return F.softmax(_z_bin_logits(red_logits, z_tok), dim=-1)
+def redshift_posterior(
+    red_logits: torch.Tensor, z_tok, temperature: float = 1.0
+) -> torch.Tensor:
+    """Softmax over the redshift sub-vocab → posterior probs (..., n_bins).
+
+    ``temperature > 1`` softens an over-confident posterior; ``< 1`` sharpens it.
+    Temperature scaling is monotone in the logits, so the argmax (and hence the
+    point prediction) is unchanged — only the spread / calibration moves.
+    """
+    z = _z_bin_logits(red_logits, z_tok)
+    if temperature != 1.0:
+        z = z / temperature
+    return F.softmax(z, dim=-1)
+
+
+def apply_temperature(probs: torch.Tensor, temperature: float) -> torch.Tensor:
+    """Re-temperature an existing posterior in probability space.
+
+    Equivalent to ``softmax(logits / T)`` even though we only kept the ``T = 1``
+    probabilities: ``softmax(log p / T)`` differs from the logits only by the
+    per-row normalisation constant, which cancels under the softmax. Lets the
+    offline analysis (and notebooks) recalibrate from stored posteriors without
+    needing the raw logits.
+    """
+    probs = probs.float()
+    if temperature == 1.0:
+        return probs
+    logp = probs.clamp_min(1e-20).log()
+    return F.softmax(logp / temperature, dim=-1)
+
+
+def fit_temperature(
+    probs: torch.Tensor,
+    z_true: torch.Tensor,
+    z_tok,
+    bounds: Sequence[float] = (0.25, 8.0),
+    iters: int = 60,
+) -> float:
+    """Fit a single temperature ``T > 0`` minimising the NLL of the true z bin
+    under the re-tempered posterior (Guo et al. 2017, applied to the z sub-vocab).
+
+    Operates on the ``T = 1`` posterior ``probs`` (..., n_bins) — equivalent to
+    scaling the logits (see :func:`apply_temperature`). ``T > 1`` softens an
+    over-confident model (high PIT-KS); ``T ≈ 1`` means already calibrated.
+
+    Derivative-free golden-section search on ``log T`` (the NLL is unimodal in
+    ``T``); CPU-safe, no autograd, so it runs the same in notebooks.
+    """
+    probs = probs.float().reshape(-1, probs.shape[-1])
+    true_bin = (z_tok.encode(z_true.flatten().cpu()).long()
+                .clamp(0, probs.shape[-1] - 1))
+    logp = probs.clamp_min(1e-20).log()  # (N, n_bins); shifted logits
+
+    def nll(t: float) -> float:
+        lp = F.log_softmax(logp / t, dim=-1)
+        return float(-lp.gather(-1, true_bin[:, None]).squeeze(-1).mean().item())
+
+    lo, hi = math.log(bounds[0]), math.log(bounds[1])
+    gr = (math.sqrt(5.0) - 1.0) / 2.0
+    c, d = hi - gr * (hi - lo), lo + gr * (hi - lo)
+    fc, fd = nll(math.exp(c)), nll(math.exp(d))
+    for _ in range(iters):
+        if fc < fd:
+            hi, d, fd = d, c, fc
+            c = hi - gr * (hi - lo)
+            fc = nll(math.exp(c))
+        else:
+            lo, c, fc = c, d, fd
+            d = lo + gr * (hi - lo)
+            fd = nll(math.exp(d))
+    return float(math.exp(0.5 * (lo + hi)))
 
 
 def uncertainty_scores(probs: torch.Tensor, z_tok, k: int = 2) -> Dict[str, torch.Tensor]:
