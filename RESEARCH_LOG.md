@@ -2581,3 +2581,60 @@ best-val branch into its own `step % ar_every_steps == 0` block (rank 0). Metric
 unaffected (use the cheap TF `val/redshift_acc` + `val/loss_redshift`); this
 just removes most of the per-best GPU stalls. Tests: 91 passed (1 pre-existing
 unrelated wandb-offline failure). Applies on the next resume of `aqxmwgl1`.
+
+---
+
+## 2026-06-18: X4 — physical redshift metrics (σ_NMAD / outliers) + continuous decoding
+
+### Run status that motivated this (W&B `jjayaseelan-university-of-san-francisco/redshifty`)
+
+- `cd1ikb99` (512-bin **hard**-CE control) broke through at ~50k: honest
+  `val/redshift_acc` 0.082, `within2` **0.302**, `val/loss_redshift` 3.79, copy
+  path `zgiven`=1.0 — **now the leader**.
+- `aqxmwgl1` (4096-bin **soft** main) at 80k: `within2` 0.176, `loss_redshift`
+  4.66 — slower; finer bins are harder to converge in this budget.
+
+The 512-hard recipe overtook the 4096-soft main on honest bin accuracy. But bin
+accuracy is **not** how AION-1 (or the redshift literature) reports quality, and
+it *undercounts* soft/fine-bin models because argmax throws away the probability
+mass spread over neighbouring bins. We could neither compare to AION nor fairly
+adjudicate 512-hard vs 4096-soft. AION measures Δz/(1+z) σ_NMAD + catastrophic
+outlier fraction over 1,024 z-bins and reports DESI-spectrum z as ~"perfect"
+(AION §7.1.1).
+
+### Change (branch `x4-redshift-eval`, eval-only, additive — no objective change)
+
+- **`src/eval/redshift_metrics.py`** (new): `redshift_metrics(z_pred, z_true)`
+  → `sigma_nmad = 1.4826·median(|Δz−median Δz|)`, `bias = median(Δz)`,
+  `outlier_frac` at |Δz|>0.0033 (DESI/Redrock) and >0.05, `rms`, `mean_abs`.
+  `decode_redshift(logits, z_tok, mode)`: `argmax` (legacy) or **`expected`**
+  (probability-weighted **in the Gaussian latent**, then mapped back through the
+  tokenizer's inverse CDF — sub-bin precision, unbiased w.r.t. the skewed z
+  density). Torch-only / CPU-safe so it imports into notebooks for the separate
+  SDSS OOD check (pair with `SpectrumTokenizer.resample_to_grid`).
+- **`src/training/eval.py`**: `evaluate()` now decodes the position-0 redshift
+  token both ways and returns `z_nmad`, `z_outlier_frac`, `z_outlier_frac_05`,
+  `z_bias` (expected) + `z_nmad_argmax`. True z is the **continuous** value from
+  the raw batch, not the re-quantized target bin.
+- **Live logging is automatic**: the train loop already logs `{f"val/{k}": v}`
+  for every returned key, so on the next resume both runs emit `val/z_nmad`,
+  `val/z_outlier_frac`, `val/z_bias`, `val/z_nmad_argmax` with no train-loop edit.
+- **`nersc/eval_redshift.py`** (new): path-agnostic checkpoint → σ_NMAD table.
+  Restores dims + z-tokenizer straight from the checkpoint
+  (`_infer_transformer_dims`, `_restore_z_tokenizer`), rebuilds the same healpix
+  val split, runs honest eval (`--redshift-mask-ratio 1.0`), prints bin-acc,
+  within2, σ_NMAD (expected vs argmax), outlier fractions, bias. Works on NERSC
+  scratch ckpts and local `checkpoints/release/`.
+
+### Verification
+
+- `tests/test_redshift_metrics.py` (new, 7 tests) green: perfect→0, constant
+  offset closed-form, one-hot expected==argmax, **expected<argmax σ_NMAD on
+  sub-bin truths**, empty NaN-safe. Existing suites still pass (91).
+- End-to-end `evaluate()` smoke (tiny untrained model): returns all `z_*` keys;
+  `z_nmad` (expected) 0.108 < `z_nmad_argmax` 0.280 — expected-value decoding
+  already lower even untrained, as designed.
+
+SDSS OOD eval stays **out of scope** here (run separately in local notebooks via
+`resample_to_grid` + this module). Possible follow-up if expected-value decoding
+plateaus: a learned sub-bin regression head.

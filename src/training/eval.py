@@ -18,6 +18,7 @@ from typing import Dict, Optional
 
 import torch
 
+from src.eval.redshift_metrics import decode_redshift, redshift_metrics
 from src.models.transformer import (
     EOS_TOKEN,
     REDSHIFT_TOKEN_OFFSET,
@@ -62,6 +63,11 @@ def evaluate(
     masked_acc_accum = 0.0
     masked_n_total = 0
     n = 0
+    # Continuous redshift collection for physical metrics (σ_NMAD, outliers).
+    # Position 0 of the decoder output is the redshift token; we decode its
+    # logit distribution back to a continuous z (argmax and expected-value)
+    # and compare against the *true continuous* z from the raw batch.
+    z_pred_exp, z_pred_arg, z_true_all = [], [], []
     for i, raw in enumerate(loader):
         if raw is None:
             continue
@@ -88,6 +94,11 @@ def evaluate(
                 # weighted average so positions with more masks count more
                 masked_acc_accum += mm["masked_spec_acc"] * mm["n_masked"]
                 masked_n_total += mm["n_masked"]
+        # Decode the redshift token (position 0) to continuous z both ways.
+        red_logits = logits[:, 0, :].float()
+        z_pred_exp.append(decode_redshift(red_logits, z_tok, mode="expected"))
+        z_pred_arg.append(decode_redshift(red_logits, z_tok, mode="argmax"))
+        z_true_all.append(raw["z"].detach().flatten().cpu().float())
         n += 1
 
     if n == 0:
@@ -96,6 +107,9 @@ def evaluate(
                **{k: nan for k in breakdown_accum}}
         if encoder_mask_ratio > 0.0:
             out["masked_spec_acc"] = nan
+        for k in ("z_nmad", "z_outlier_frac", "z_outlier_frac_05",
+                  "z_bias", "z_nmad_argmax"):
+            out[k] = nan
         return out
 
     out = {"loss": losses / n, **{k: v / n for k, v in metrics_accum.items()}}
@@ -104,6 +118,18 @@ def evaluate(
         out["masked_spec_acc"] = (
             masked_acc_accum / masked_n_total if masked_n_total > 0 else float("nan")
         )
+
+    # Physical redshift metrics (AION-comparable). With redshift_mask_ratio=1.0
+    # these are the honest predict-z-from-spectrum numbers. Expected-value
+    # decoding gives sub-bin precision; argmax is reported for the delta.
+    z_true = torch.cat(z_true_all)
+    me = redshift_metrics(torch.cat(z_pred_exp), z_true)
+    ma = redshift_metrics(torch.cat(z_pred_arg), z_true)
+    out["z_nmad"] = me["sigma_nmad"]
+    out["z_outlier_frac"] = me["outlier_frac"]
+    out["z_outlier_frac_05"] = me["outlier_frac_05"]
+    out["z_bias"] = me["bias"]
+    out["z_nmad_argmax"] = ma["sigma_nmad"]
     return out
 
 
