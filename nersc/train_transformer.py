@@ -175,7 +175,15 @@ def parse_args():
                         "0.0 keeps hard CE; ~1.5 is a good starting point.")
     p.add_argument("--ar-eval-batches", type=int, default=4,
                    help="Number of batches to run through autoregressive "
-                        "eval at end-of-run and on best checkpoint.")
+                        "eval at end-of-run and on the AR cadence.")
+    p.add_argument("--ar-every-steps", type=int, default=10000,
+                   help="Run the (expensive, rank-0-only) autoregressive eval "
+                        "every N steps, decoupled from best-val. Redshift is "
+                        "target position 0, so the cheap teacher-forced "
+                        "val/redshift_acc already equals the AR redshift number "
+                        "over more samples; AR's unique value is honest "
+                        "free-running spectrum generation + the z-given "
+                        "copy-leak probe, which don't need to run on every best.")
 
     # Logging
     p.add_argument("--run-name", type=str, default="approach_a")
@@ -236,6 +244,7 @@ def main():
         args.n_heads = 8
         args.z_fit_files = min(args.z_fit_files, 5)
         args.ar_eval_batches = 1
+        args.ar_every_steps = min(args.ar_every_steps, 50)
 
     # Variable mask-ratio schedule: both bounds must be given together and form
     # a valid sub-interval of [0, 1]. When unset, training uses the fixed
@@ -663,31 +672,38 @@ def main():
                         },
                     )
 
-                # Honest AR redshift accuracy: z hidden from the encoder.
-                ar = evaluate_ar(
-                    model.module if is_distributed else model,
-                    val_loader, spec_tok, z_tok, args.approach, device,
-                    max_batches=args.ar_eval_batches,
-                    encoder_mask_ratio=args.encoder_mask_ratio,
-                    redshift_mask_ratio=1.0,
-                )
-                # z-given AR for comparison (exposes any residual copy path).
-                ar_zgiven = evaluate_ar(
-                    model.module if is_distributed else model,
-                    val_loader, spec_tok, z_tok, args.approach, device,
-                    max_batches=args.ar_eval_batches,
-                    encoder_mask_ratio=args.encoder_mask_ratio,
-                    redshift_mask_ratio=0.0,
-                )
-                model.train()
-                print(f"  [ar_best {step:6d}] " + " ".join(f"{k}={ar[k]}" for k in ar)
-                      + f" | zgiven_redshift_acc={ar_zgiven['ar_redshift_acc']}")
-                with metrics_path.open("a") as f:
-                    f.write(json.dumps({"kind": "ar_best", "step": step,
-                                        **{f"val_ar_{k}": vv for k, vv in ar.items()},
-                                        "val_ar_redshift_acc_zgiven": ar_zgiven["ar_redshift_acc"]}) + "\n")
-                wlog(wandb_run, {**{f"val_ar/{k}": vv for k, vv in ar.items()},
-                                 "val_ar/redshift_acc_zgiven": ar_zgiven["ar_redshift_acc"]}, step=step)
+        if rank == 0 and step > 0 and step % args.ar_every_steps == 0:
+            # Honest autoregressive eval on its own sparse cadence, decoupled
+            # from best-val. Redshift is target position 0, so the cheap
+            # teacher-forced val/redshift_acc already equals the AR redshift
+            # number (over more samples) — AR's unique value is honest
+            # free-running SPECTRUM generation plus the z-given copy-leak probe.
+            # It is rank-0-only and stalls the other ranks at the next
+            # allreduce, so it runs rarely (default every 10k steps).
+            ar = evaluate_ar(
+                model.module if is_distributed else model,
+                val_loader, spec_tok, z_tok, args.approach, device,
+                max_batches=args.ar_eval_batches,
+                encoder_mask_ratio=args.encoder_mask_ratio,
+                redshift_mask_ratio=1.0,
+            )
+            # z-given AR for comparison (exposes any residual copy path).
+            ar_zgiven = evaluate_ar(
+                model.module if is_distributed else model,
+                val_loader, spec_tok, z_tok, args.approach, device,
+                max_batches=args.ar_eval_batches,
+                encoder_mask_ratio=args.encoder_mask_ratio,
+                redshift_mask_ratio=0.0,
+            )
+            model.train()
+            print(f"  [ar {step:6d}] " + " ".join(f"{k}={ar[k]}" for k in ar)
+                  + f" | zgiven_redshift_acc={ar_zgiven['ar_redshift_acc']}")
+            with metrics_path.open("a") as f:
+                f.write(json.dumps({"kind": "ar", "step": step,
+                                    **{f"val_ar_{k}": vv for k, vv in ar.items()},
+                                    "val_ar_redshift_acc_zgiven": ar_zgiven["ar_redshift_acc"]}) + "\n")
+            wlog(wandb_run, {**{f"val_ar/{k}": vv for k, vv in ar.items()},
+                             "val_ar/redshift_acc_zgiven": ar_zgiven["ar_redshift_acc"]}, step=step)
 
         if rank == 0 and step > 0 and step % args.save_every == 0:
             msd = model.module.state_dict() if is_distributed else model.state_dict()

@@ -2554,3 +2554,30 @@ srun --gpu-bind=none python nersc/train_transformer.py \
     --healpix-holdout-frac 0.05 --ar-eval-batches 8 \
     --run-name approach_a_v2cache_x2x3_ddp4 --wandb-project redshifty
 ```
+
+## 2026-06-18: AR eval decoupled from best-val → fixed 10k-step cadence
+
+The autoregressive eval (`evaluate_ar`, ×2: honest + z-given) ran inside the
+`if v["loss"] < best_val` block, so early in training — when best improves on
+nearly every 500-step val while redshift is still random — it fired constantly.
+It is **rank-0-only** and stalls the other 3 GPUs at the next allreduce; live
+telemetry on `aqxmwgl1` showed ~225–250 s stalls on best events (AR + the
+~1 GB checkpoint save/upload bundled together).
+
+Key realization: **AR is redundant for redshift.** Redshift is decoder target
+**position 0**, so the teacher-forced `val/redshift_acc` (logged free every
+500 steps, over ~1600 samples) conditions on exactly the same context as AR's
+first generation step — they measure the same thing, and the TF one is less
+noisy. Confirmed live: TF `val/redshift_acc` 0.000625 (1/1600) vs AR
+`ar_redshift_acc` 0.0039 (1/256), both random. AR's only non-redundant signal
+is honest free-running **spectrum** generation + the z-given copy-leak probe —
+neither needs to run on every best.
+
+Change: new `--ar-every-steps` (default **10000**); the AR block moved out of the
+best-val branch into its own `step % ar_every_steps == 0` block (rank 0). Metric
+`kind` renamed `ar_best` → `ar` (no consumers of the old name). Smoke caps it to
+50 so the path is still exercised. Wired `AR_EVERY_STEPS` into
+`train_transformer_ddp.slurm`. End-of-run AR unchanged. Redshift tracking is
+unaffected (use the cheap TF `val/redshift_acc` + `val/loss_redshift`); this
+just removes most of the per-best GPU stalls. Tests: 91 passed (1 pre-existing
+unrelated wandb-offline failure). Applies on the next resume of `aqxmwgl1`.
