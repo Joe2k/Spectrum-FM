@@ -247,8 +247,17 @@ def _report_uncertainty(v, args, z_tok):
     print(f"\n  Calibrated outlier-detection AUROC (η>{CATASTROPHIC_DZ}):")
     for name, s in scores_T.items():
         print(f"    {name:18s}: {outlier_auroc(s, is_outlier):.4f}")
-    if ks_T >= ks:
-        print(f"  -> temperature did NOT help; keep redshift_temperature=1.0")
+    # Recommendation keys off rejection (the metric we ship), not PIT: a soft,
+    # over-dispersed posterior lets temperature nudge PIT while wrecking the
+    # posterior_std_z ranking — only bake T if rejection is preserved. Use X8c
+    # (below) for calibration instead.
+    auroc_base = outlier_auroc(scores[DEFAULT_REJECTION_SCORE], is_outlier)
+    auroc_T = outlier_auroc(scores_T[DEFAULT_REJECTION_SCORE], is_outlier)
+    if auroc_T < auroc_base - 0.01 or ks_T >= ks:
+        print(f"  -> temperature hurts rejection "
+              f"({DEFAULT_REJECTION_SCORE} AUROC {auroc_base:.3f}->{auroc_T:.3f}) "
+              f"or doesn't help PIT; keep redshift_temperature=1.0 "
+              f"(use X8c recalibration for calibration)")
     else:
         print(f"  -> bake T={T:.3f} into eval/train via "
               f"`evaluate(..., redshift_temperature={T:.3f})`")
