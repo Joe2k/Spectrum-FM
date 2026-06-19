@@ -2877,3 +2877,60 @@ PIT KS 0.35→0.08. Tests: `fit_temperature` softens an over-confident posterior
 is identity at T=1 and raises entropy at T>1. `pytest tests/test_redshift_*` 20
 green. Next: run `--uncertainty` on `aqxmwgl1` final `best.pt` to read the real
 fitted T and the calibrated PIT KS, then bake it into the release eval.
+
+---
+
+## 2026-06-19: X8b verdict (temperature is the wrong tool) + X8c isotonic recalibration
+
+Ran `--uncertainty` on the **finished** `aqxmwgl1` `best.pt` (held-out DESI val,
+honest z-hidden, 1600 spectra). Two results.
+
+### 1. The final 200k model is the headline (T=1)
+
+| coverage | σ_NMAD | η>0.0033 | η>0.05 |
+|---|---|---|---|
+| 100% | 0.000348 | 4.81% | 0.81% |
+| **95%** | 0.000312 | **1.45%** | 0.13% |
+| **90%** | 0.000281 | **0.21%** | 0.00% |
+| 80% | 0.000237 | 0.08% | 0.00% |
+| 70% | 0.000203 | 0.00% | 0.00% |
+
+Raw σ_NMAD **0.000348** (was 0.000646 @ 89k — nearly halved), bias +4e-6,
+`posterior_std_z` AUROC **0.985**. At 90% completeness: **σ_NMAD 2.8e-4 / η
+0.21%** — past SpecPT (0.0006–0.0008 / 0.20–0.80%) on *both* axes, from a model
+that also reconstructs spectra. **This (T=1) is the paper number.**
+
+### 2. X8b temperature calibration — a documented negative result
+
+Fitted **T pinned to the search floor (0.250)** — the NLL objective wanted to
+*sharpen* further. It barely helped PIT (KS 0.290→0.233) and **destroyed the
+result we use**: `posterior_std_z` AUROC **0.985→0.860**, η@90% **0.21%→2.43%**
+(10× worse). Why: the σ=24-bin soft labels make the posterior *over-dispersed by
+design* (central-peaked PIT, `26 30 57 77 468 727 116 57 29 13`). Hard-bin NLL
+therefore always prefers sharpening, and one global temperature that sharpens the
+bulk crushes the *relative* spread that carries the outlier signal. **Decision:
+keep `redshift_temperature=1.0`; do not bake T.** The native posterior is a
+superb *ranking* uncertainty (rejection) even though its *absolute* calibration
+is off — and over-dispersion is the safe (under-confident) direction.
+
+### 3. X8c — isotonic PIT recalibration (the correct fix)
+
+A monotone remap of the PIT through the calibration ECDF (Kuleshov et al. 2018;
+for this objective the ECDF *is* the isotonic solution). Because it acts on the
+PIT, not the rejection score, **the point predictions, σ_NMAD and the entire
+`posterior_std_z` rejection table are unchanged by construction** — it fixes
+absolute calibration with no accuracy/rejection trade-off, exactly what
+temperature could not do. `fit_pit_recalibrator` / `apply_pit_recalibration`
+(torch-only, CPU/notebook-safe). `eval_redshift.py --uncertainty` fits it on a
+held-out half of val and reports KS on the other half.
+
+Synthetic central-peaked PIT (matching the observed shape): held-out PIT KS
+**0.30→0.04**, histogram flattened to ~uniform. Tests: makes uniform + monotone,
+generalises held-out, leaves an already-uniform PIT uniform. `pytest
+tests/test_redshift_*` 23 green.
+
+**Net:** release/eval stays at T=1 for predictions + rejection (the result);
+X8c supplies calibrated PIT / credible intervals for the writeup without touching
+either. Per-sample arrays + recal knots dumped to
+`$SCRATCH/x8b_4096soft_caltemp.npz`. Possible X8d: same posterior tooling on the
+SDSS OOD check (notebook import).
