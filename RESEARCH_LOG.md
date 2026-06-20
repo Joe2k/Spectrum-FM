@@ -3119,3 +3119,47 @@ read: σ_NMAD vs SpecPT (0.0006–0.0008), how far `posterior_std_z` rejection +
 X8c recalibration transfer OOD, and flux ivar-R² vs the in-distribution 0.9976.
 If it holds → headline; if it degrades → defines the one justified GPU run
 (flux-domain augmentation / robustness).
+
+### X9 RESULT — SDSS DR17 (1000 spectra, plate 0266 RUN2D=26) — the dichotomy
+
+Tokenizer `tokenizer_v2_3k_v3/final.pt`, 4096-soft `best.pt`, honest z-hidden.
+
+| metric | in-dist (DESI) | **OOD (SDSS)** |
+|---|---|---|
+| spectrum masked χ²/pixel · ivar-R² | 1.328 · 0.9976 | **1.353 · 0.9891** |
+| spectrum codec ceiling χ² · R² | 1.156 · 0.9979 | 0.891 · 0.9929 |
+| redshift σ_NMAD argmax / expected | 0.00077 / 0.00046 | **0.00244 / 0.00371** |
+| redshift η>0.0033 / η>0.05 | 9.3% / 2.9% | **45.3% / 7.0%** |
+| redshift bias median(Δz) | +1e-5 | **+0.00202** |
+| posterior_std_z rejection AUROC | 0.985 | 0.844 |
+| PIT KS → X8c recalibrated (held-out) | 0.244 | 0.307 → **0.064** |
+
+**Spectrum reconstruction transfers; absolute redshift does not.** Masked
+flux-recon ivar-R² 0.989 (vs 0.998 in-dist), χ²/pixel 1.35 ≈ 1.33 — essentially
+identical on a *different telescope*. So the self-supervised masked objective
+learned real spectral structure, not DESI instrument artifacts. The tokenizer is
+even better on SDSS (χ² 0.89). **This is a genuine positive generalization
+result.**
+
+Redshift degrades ~5–10× with a **systematic bias +0.002**. Three tells:
+(1) expected-value decoding is now *worse* than argmax (inverse of in-dist) ⇒ the
+OOD posterior is broad/skewed, so argmax is the robust OOD readout;
+(2) the +0.002 bias is a systematic offset, not scatter (σ_NMAD already
+median-subtracted, so the scatter is genuinely ~5× worse even de-biased);
+(3) rejection weakened (AUROC 0.985→0.84) and does not rescue it (η still 19% @
+50% completeness). Redshift is a fine-grained *absolute* quantity tied to learned
+line positions + the z-tokenizer's DESI-fit CDF prior + wavelength/flux
+calibration — so it overfits the source instrument; reconstruction is local/
+relative and transfers. **One good redshift result: calibration recovers OOD —
+X8c isotonic KS 0.307→0.064 held-out.**
+
+Caveat: plate 0266 / MJD 51602 is an *early commissioning-era* SDSS-I plate; the
+bias may be partly its spectrophotometric/wavelength calibration. **Next: (a)
+cheap diagnostic — re-run X9 on 2–3 modern plates + an eBOSS plate, and check
+Δz-vs-z, to localize whether the +0.002 bias is plate/DR-specific (calibration,
+trivially correctable) or universal (model). (b) The justified GPU run =
+OOD-robustness training: flux/instrument-domain augmentation (LSF/resolution
+degrade, noise injection, flux-scale + wavelength-grid jitter) so the model stops
+relying on DESI's exact instrument response — targets the redshift OOD gap
+directly. Spectrum side needs nothing.** Per-sample arrays:
+`$SCRATCH/x9_sdss_dr17_p0266.npz`.
