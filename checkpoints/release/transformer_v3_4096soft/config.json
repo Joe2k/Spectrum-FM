@@ -1,0 +1,21 @@
+{
+  "model_id": "transformer_v3_4096soft",
+  "display_name": "Spectrum-FM Transformer V3 \u2014 4096-bin soft-label redshift (v2 tokens, X2+X3)",
+  "wandb_artifact": "jjayaseelan-university-of-san-francisco/redshifty/approach_a_v2cache_x2x3_ddp4 (run aqxmwgl1, best.pt stripped of optimizer)",
+  "checkpoint": "transformer_v3_4096soft/best.pt",
+  "role": "transformer",
+  "d_model": 768,
+  "n_encoder_layers": 6,
+  "n_decoder_layers": 6,
+  "n_heads": 12,
+  "dropout": 0.0,
+  "approach": "a",
+  "encoder_mask_ratio": 0.5,
+  "redshift_mask_ratio": 0.5,
+  "redshift_soft_sigma": 24.0,
+  "z_bins": 4096,
+  "val_loss": 7.956266050338745,
+  "step": 192500,
+  "has_embedded_z_tokenizer": true,
+  "requires_tokenizer": "spectrum_tokenizer_v2"
+}

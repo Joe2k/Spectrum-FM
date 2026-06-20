@@ -20,6 +20,20 @@
       "checkpoint": "approach_a_fm_v1_10k_a_ddp4_redmask50_v9/best.pt",
       "approach": "a",
       "requires_tokenizer": "spectrum_tokenizer_v1"
+    },
+    "transformer_v2_512hard": {
+      "display_name": "Spectrum-FM Transformer V2 \u2014 512-bin hard redshift (v2 tokens, masked-targets X2)",
+      "wandb_artifact": "jjayaseelan-university-of-san-francisco/redshifty/approach_a_v2cache_x2_512hard_ctrl_ddp4 (run cd1ikb99, best.pt stripped of optimizer)",
+      "checkpoint": "transformer_v2_512hard/best.pt",
+      "approach": "a",
+      "requires_tokenizer": "spectrum_tokenizer_v2"
+    },
+    "transformer_v3_4096soft": {
+      "display_name": "Spectrum-FM Transformer V3 \u2014 4096-bin soft-label redshift (v2 tokens, X2+X3)",
+      "wandb_artifact": "jjayaseelan-university-of-san-francisco/redshifty/approach_a_v2cache_x2x3_ddp4 (run aqxmwgl1, best.pt stripped of optimizer)",
+      "checkpoint": "transformer_v3_4096soft/best.pt",
+      "approach": "a",
+      "requires_tokenizer": "spectrum_tokenizer_v2"
     }
   },
   "default_tokenizer": "spectrum_tokenizer_v1",

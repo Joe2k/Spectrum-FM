@@ -62,6 +62,28 @@ ARTIFACT_MAP = {
         "approach": "a",
         "requires_tokenizer": "spectrum_tokenizer_v1",
     },
+    # V2/V3 transformers (v2 tokens). best.pt is the run's best-val checkpoint
+    # stripped of optimizer/scaler (~400MB vs 1.2GB) and committed directly via
+    # git-LFS — there is no W&B artifact, so these are sourced from a staged
+    # local file (NERSC $SCRATCH/deepsrch/checkpoints/<run>/best.pt → strip → LFS).
+    "transformer_v2_512hard": {
+        "model_id": "transformer_v2_512hard",
+        "display_name": "Spectrum-FM Transformer V2 — 512-bin hard redshift (v2 tokens, masked-targets X2)",
+        "wandb_artifact": f"{WANDB_ENTITY}/{WANDB_PROJECT}/approach_a_v2cache_x2_512hard_ctrl_ddp4 (run cd1ikb99, best.pt stripped of optimizer)",
+        "role": "transformer",
+        "approach": "a",
+        "requires_tokenizer": "spectrum_tokenizer_v2",
+        "local_pt": "checkpoints/release/transformer_v2_512hard/best.pt",
+    },
+    "transformer_v3_4096soft": {
+        "model_id": "transformer_v3_4096soft",
+        "display_name": "Spectrum-FM Transformer V3 — 4096-bin soft-label redshift (v2 tokens, X2+X3)",
+        "wandb_artifact": f"{WANDB_ENTITY}/{WANDB_PROJECT}/approach_a_v2cache_x2x3_ddp4 (run aqxmwgl1, best.pt stripped of optimizer)",
+        "role": "transformer",
+        "approach": "a",
+        "requires_tokenizer": "spectrum_tokenizer_v2",
+        "local_pt": "checkpoints/release/transformer_v3_4096soft/best.pt",
+    },
 }
 
 
