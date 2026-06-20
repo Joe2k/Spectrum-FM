@@ -50,6 +50,7 @@ from src.eval.spectrum_metrics import (  # noqa: E402
 from src.inference.release import _infer_transformer_dims, _restore_z_tokenizer  # noqa: E402
 from src.models.transformer import (  # noqa: E402
     REDSHIFT_TOKEN_OFFSET,
+    SOS_TOKEN,
     SPECTRUM_TOKEN_OFFSET,
     SpectrumTransformer,
 )
@@ -78,6 +79,12 @@ def parse_args():
     p.add_argument("--max-batches", type=int, default=50)
     p.add_argument("--encoder-mask-ratio", type=float, default=0.5,
                    help="Spectrum positions hidden from the encoder (match training).")
+    p.add_argument("--blind", action="store_true",
+                   help="Also run a fully-blind AR reconstruction (model.generate, "
+                        "no teacher forcing) — the honest 'reconstruct hidden tokens "
+                        "from context alone' number. Slow; capped by --blind-max-batches.")
+    p.add_argument("--blind-max-batches", type=int, default=8,
+                   help="Batches for the (slow) blind AR pass.")
     p.add_argument("--healpix-holdout-frac", type=float, default=0.05)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--max-spectra", type=int, default=None)
@@ -152,6 +159,80 @@ def evaluate_spectrum(model, loader, spec_tok, z_tok, approach, device, amp,
     }
 
 
+@torch.no_grad()
+def evaluate_spectrum_blind(model, loader, spec_tok, z_tok, approach, device,
+                            encoder_mask_ratio, max_batches):
+    """Fully-blind AR reconstruction — no teacher forcing.
+
+    Tokens are generated from SOS with `model.generate` (greedy, top_k=1), so each
+    masked token is inferred from the *masked* encoder + the model's own generated
+    history, never the true previous tokens. This isolates "reconstruct the hidden
+    spectrum from context alone", vs the teacher-forced masked_spec_acc analog.
+    Slow (≈L_dec forwards/batch) — cap with `max_batches`. Run in fp32 (greedy
+    multinomial), no autocast.
+    """
+    model.eval()
+    L_dec = N_TOKENS + 2  # decoder target = [rz, spec×N_TOKENS, eos]
+    acc = {"masked": None, "all": None}
+    tok_correct = tok_total = 0
+
+    def _accum(key, new):
+        new = {k: v.detach().cpu() for k, v in new.items()}
+        acc[key] = new if acc[key] is None else add_sums(acc[key], new)
+
+    for i, raw in enumerate(loader):
+        if raw is None:
+            continue
+        if i >= max_batches:
+            break
+        flux = raw["flux"].to(device, non_blocking=True)
+        ivar = raw["ivar"].to(device, non_blocking=True)
+        wave = raw["wavelength"].to(device, non_blocking=True)
+        istd = torch.sqrt(ivar.clamp(min=1e-10))
+        x = torch.stack([flux, istd], dim=1)
+        indices, denorm = spec_tok.encode(x, wavelength=wave)
+        if indices.dim() == 3:
+            indices = indices.squeeze(1)
+        indices = indices.long()
+        x_grid = spec_tok._to_grid(x, wave)
+        flux_obs, istd_grid = x_grid[:, 0], x_grid[:, 1]
+
+        enc, _dec, _tgt, mask_pos = tokenize_and_build(
+            raw, spec_tok, z_tok, approach, device,
+            encoder_mask_ratio=encoder_mask_ratio, redshift_mask_ratio=1.0,
+            wavelength_aware=True, mask_targets_only=False)
+        gen = model.generate(enc, decoder_start_token=SOS_TOKEN,
+                             max_new_tokens=L_dec, temperature=1.0, top_k=1)
+        gen_preds = gen[:, 1:1 + L_dec]            # predictions aligned to target
+        n_spec = max(0, min(N_TOKENS, gen_preds.shape[1] - 1))  # spec tokens emitted
+        if n_spec == 0:
+            continue
+        pred_codes = (gen_preds[:, 1:1 + n_spec] - SPECTRUM_TOKEN_OFFSET
+                      ).clamp(0, N_SPEC_CODES - 1)   # (B, n_spec)
+
+        # effective mask: hidden AND actually generated; rare early-EOS tail stays true.
+        eff = mask_pos.bool().clone()
+        if n_spec < N_TOKENS:
+            eff[:, n_spec:] = False
+        m = eff[:, :n_spec]
+        tok_correct += int(((pred_codes == indices[:, :n_spec]) & m).sum().item())
+        tok_total += int(m.sum().item())
+
+        pred_idx = indices.clone()
+        pred_idx[:, :n_spec] = torch.where(m, pred_codes, indices[:, :n_spec])
+        flux_pred = spec_tok.decode(pred_idx, denorm)[:, 0]
+        pix_mask = token_mask_to_pixel_mask(eff)      # (B, 8704)
+        _accum("masked", recon_weighted_sums(flux_pred, flux_obs, istd_grid, pix_mask))
+        _accum("all", recon_weighted_sums(flux_pred, flux_obs, istd_grid))
+
+    return {
+        "masked_token_acc": (tok_correct / tok_total) if tok_total else float("nan"),
+        "n_masked_tokens": tok_total,
+        "recon_masked": finalize_recon(acc["masked"]) if acc["masked"] else {},
+        "recon_all": finalize_recon(acc["all"]) if acc["all"] else {},
+    }
+
+
 def main():
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -207,6 +288,19 @@ def main():
     print(_row("codec ceiling (all px)", v["recon_codec"]))
     print(_row("predicted (masked blocks)", v["recon_masked"]))
     print(_row("predicted (all px)", v["recon_all"]))
+
+    if args.blind:
+        vb = evaluate_spectrum_blind(
+            model, val_loader, spec_tok, z_tok, args.approach, device,
+            encoder_mask_ratio=args.encoder_mask_ratio,
+            max_batches=args.blind_max_batches)
+        print("-" * 64)
+        print(f"  FULLY-BLIND AR (no teacher forcing; {args.blind_max_batches} batches)")
+        print(f"  blind masked-token acc       : {vb['masked_token_acc']:.4f}  "
+              f"(n={vb['n_masked_tokens']})")
+        print(_row("blind predicted (masked blk)", vb["recon_masked"]))
+        print(_row("blind predicted (all px)", vb["recon_all"]))
+
     print("=" * 64)
     print("  χ²/pixel → 1.0 = reconstruction at DESI's noise floor; "
           "ivar-R² → 1 = perfect.")
