@@ -40,8 +40,14 @@ Living document of findings, decisions, and experimental results.
 - CFS mirror (training `--cfs-out`): `/global/cfs/cdirs/deepsrch/$USER/checkpoints/<run_name>`
 - Eval dumps: `$SCRATCH/x8_{4096soft,512hard}.npz`, `$SCRATCH/x8b_4096soft_caltemp.npz`
 
-**Release checkpoints (in-repo):** `checkpoints/release/` — incl.
-`spectrum_tokenizer_v2/best.pt`, `approach_a_fm_v1_10k_a_ddp4_redmask50_v9/` (v9, v1 tokens).
+**Release checkpoints (in-repo, git-LFS `best.pt`):** `checkpoints/release/` —
+`spectrum_tokenizer_v1/`, `spectrum_tokenizer_v2/`, and three transformers:
+`approach_a_fm_v1_10k_a_ddp4_redmask50_v9/` (= **V1**, v1 tokens),
+`transformer_v2_512hard/` (= **V2**, 512-bin hard, v2 tokens, run cd1ikb99),
+`transformer_v3_4096soft/` (= **V3**, 4096-bin soft, v2 tokens, run aqxmwgl1).
+V2/V3 `best.pt` = run best-val stripped of optimizer (~400MB). Notebooks:
+`notebooks/07…` (V1), `notebooks/09_predictions_v2_512hard.ipynb`,
+`notebooks/10_predictions_v3_4096soft.ipynb`.
 
 **SDSS OOD data (NERSC CFS):** `/global/cfs/cdirs/sdss/data/sdss/dr{7..17}/` — spec-lite
 coadds at `.../spectro/redux/<RUN2D>/spectra/lite/<PLATE>/spec-<PLATE>-<MJD>-<FIBER>.fits`
@@ -3272,3 +3278,34 @@ the encoder was actually masked, which led to building the blind eval.
 
 (Infra: Claude has direct NERSC ssh — `ssh -i ~/.ssh/nersc joe2k@perlmutter`, sshproxy
 cert ~24h; NERSC git remote is `origin`; runs on `-A deepsrch_g -C gpu -q interactive`.)
+
+---
+
+## 2026-06-20: Release V2/V3 transformers + per-model prediction notebooks
+
+Promoted the two v2-token transformers to release checkpoints alongside V1 (v9),
+and built per-model notebooks so all three can be compared on the same DESI +
+SDSS-OOD plots.
+
+**Release (`10c61d6`).** `transformer_v2_512hard` (512-bin hard, run cd1ikb99,
+step 181k) and `transformer_v3_4096soft` (4096-bin soft, run aqxmwgl1, step 192.5k),
+both `requires_tokenizer=spectrum_tokenizer_v2`, approach a. `best.pt` is the run's
+best-val checkpoint **stripped of optimizer/scaler** (~400MB vs 1.2GB — the loader
+only needs `model`+`z_tokenizer`) committed via git-LFS (814MB upload). Added
+`config.json` per model, MANIFEST `models` entries, and `setup_release_checkpoints.py`
+provenance entries. Verified `load_release_models()` returns both (100.3M / 103.1M
+params, z_bins 512 / 4096). Done with direct NERSC access: strip on a login node →
+`scp` the two stripped `.pt` down → LFS commit/push.
+
+**Notebooks.** `09_predictions_v2_512hard.ipynb` and `10_predictions_v3_4096soft.ipynb`
+are copies of `07_visualize_predictions.ipynb` (V1) with `MODEL_ID` set and outputs
+cleared. **Critical adaptation:** V1 used tokenizer v1 (legacy length-stretch); V2/V3
+use tokenizer v2 (**wavelength-aware** resample). A pure copy would mis-preprocess and
+invalidate the comparison, so a `WAVELENGTH_AWARE=True` flag is threaded through
+`specs_to_batch`/`resample_sdss` (carry `wavelength`), every `tokenize_and_build(...,
+wavelength_aware=…)`, and the `spec_tok.encode(x, wavelength=…)` denorm calls — verified
+all edit sites landed and both notebooks pass `nbformat.validate`. NOT executed here (no
+local GPU / DESI-FITS / SDSS-stream env): **Run-All locally to generate the comparison
+plots.** Note the prior X9 finding — OOD redshift collapses to the DESI prior and
+fully-blind OOD reconstruction degrades — so expect the OOD panels to look much worse
+than DESI for all three.
