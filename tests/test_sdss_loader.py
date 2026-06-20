@@ -20,7 +20,7 @@ from src.utils.sdss import (  # noqa: E402
 
 
 def _write_spec(path, n=200, z=0.5, zwarn=0, flux_val=1.0, descending=False,
-                lam_lo=3800.0, lam_hi=9200.0):
+                lam_lo=3800.0, lam_hi=9200.0, z_hdu="SPECOBJ"):
     loglam = np.linspace(np.log10(lam_lo), np.log10(lam_hi), n).astype(np.float32)
     if descending:
         loglam = loglam[::-1].copy()
@@ -30,11 +30,11 @@ def _write_spec(path, n=200, z=0.5, zwarn=0, flux_val=1.0, descending=False,
         fits.Column(name="flux", format="E", array=flux),
         fits.Column(name="loglam", format="E", array=loglam),
         fits.Column(name="ivar", format="E", array=ivar)], name="COADD")
-    specobj = fits.BinTableHDU.from_columns([
+    zhdu = fits.BinTableHDU.from_columns([
         fits.Column(name="Z", format="E", array=np.array([z], dtype=np.float32)),
         fits.Column(name="ZWARNING", format="J", array=np.array([zwarn]))],
-        name="SPECOBJ")
-    fits.HDUList([fits.PrimaryHDU(), coadd, specobj]).writeto(path, overwrite=True)
+        name=z_hdu)
+    fits.HDUList([fits.PrimaryHDU(), coadd, zhdu]).writeto(path, overwrite=True)
     return path
 
 
@@ -49,6 +49,17 @@ def test_read_basic(tmp_path):
     assert rec["wavelength"][0] < rec["wavelength"][-1]
     assert 3790 < rec["wavelength"][0] < 3810
     assert 9180 < rec["wavelength"][-1] < 9220
+
+
+def test_reads_eboss_spall_hdu(tmp_path):
+    # BOSS/eBOSS put the redshift in HDU 'SPALL', not legacy 'SPECOBJ'.
+    p = _write_spec(tmp_path / "spec-eboss.fits", z=0.83, zwarn=0, z_hdu="SPALL")
+    rec = read_sdss_spec_fits(p)
+    assert rec is not None
+    assert abs(rec["z"] - 0.83) < 1e-4
+    assert rec["zwarn"] == 0
+    # And the full dataset path keeps it (finite z, good zwarn).
+    assert len(SDSSSpectrumDataset(tmp_path)) == 1
 
 
 def test_descending_wavelength_is_flipped(tmp_path):

@@ -35,7 +35,7 @@ def read_sdss_spec_fits(
     path: Union[str, Path],
     *,
     coadd_hdu: Union[str, int] = "COADD",
-    specobj_hdu: Union[str, int] = "SPECOBJ",
+    specobj_hdu: Union[str, int, Sequence[Union[str, int]]] = ("SPECOBJ", "SPALL"),
     flux_col: str = "flux",
     loglam_col: str = "loglam",
     ivar_col: str = "ivar",
@@ -44,12 +44,16 @@ def read_sdss_spec_fits(
 ) -> Optional[dict]:
     """Read one SDSS ``spec-*.fits`` into ``{flux, ivar, wavelength, z, zwarn}``.
 
-    Wavelength is ``10**loglam`` (Angstrom, ascending). Returns ``None`` if the
-    file can't be parsed (so a directory scan can skip bad files).
+    Wavelength is ``10**loglam`` (Angstrom, ascending). The redshift HDU differs
+    by survey — legacy SDSS-I/II uses ``SPECOBJ``, BOSS/eBOSS uses ``SPALL`` — so
+    ``specobj_hdu`` may be a list of candidate names tried in order. Returns
+    ``None`` if the file can't be parsed (so a directory scan can skip bad files).
     """
     from astropy.io import fits
 
     path = Path(path)
+    candidates = ([specobj_hdu] if isinstance(specobj_hdu, (str, int))
+                  else list(specobj_hdu))
     try:
         with fits.open(path, memmap=False) as hdul:
             coadd = hdul[coadd_hdu].data
@@ -60,13 +64,17 @@ def read_sdss_spec_fits(
 
             z = float("nan")
             zwarn = 0
-            try:
-                sp = hdul[specobj_hdu].data
-                z = float(np.asarray(sp[z_col]).ravel()[0])
-                if zwarn_col in sp.names:
-                    zwarn = int(np.asarray(sp[zwarn_col]).ravel()[0])
-            except (KeyError, IndexError, TypeError):
-                pass
+            for hdu_name in candidates:
+                try:
+                    sp = hdul[hdu_name].data
+                    if sp is None or z_col not in sp.names:
+                        continue
+                    z = float(np.asarray(sp[z_col]).ravel()[0])
+                    if zwarn_col in sp.names:
+                        zwarn = int(np.asarray(sp[zwarn_col]).ravel()[0])
+                    break
+                except (KeyError, IndexError, TypeError, AttributeError):
+                    continue
     except Exception:  # noqa: BLE001 — malformed FITS, skip it
         return None
 
