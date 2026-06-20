@@ -50,7 +50,10 @@ from src.tokenizers.spectrum import SpectrumTokenizer  # noqa: E402
 from src.training.eval import evaluate  # noqa: E402
 from src.utils.sdss import SDSSSpectrumDataset, collate_sdss_skip_none  # noqa: E402
 
-from eval_spectrum import evaluate_spectrum  # noqa: E402  (nersc/ sibling)
+from eval_spectrum import (  # noqa: E402  (nersc/ sibling)
+    evaluate_spectrum,
+    evaluate_spectrum_blind,
+)
 
 
 def parse_args():
@@ -72,6 +75,10 @@ def parse_args():
     p.add_argument("--max-spectra", type=int, default=None)
     p.add_argument("--encoder-mask-ratio", type=float, default=0.5,
                    help="Spectrum masking for the X10 reconstruction pass.")
+    p.add_argument("--blind", action="store_true",
+                   help="Also run the fully-blind AR reconstruction (no teacher "
+                        "forcing) — the honest OOD transfer number. Slow.")
+    p.add_argument("--blind-max-batches", type=int, default=8)
     p.add_argument("--require-good-zwarn", action="store_true", default=True)
     p.add_argument("--keep-bad-zwarn", dest="require_good_zwarn",
                    action="store_false")
@@ -121,11 +128,11 @@ def _report_redshift(v):
     return is_outlier, dz
 
 
-def _report_spectrum(vs, mask_ratio):
+def _report_spectrum(vs, mask_ratio, vb=None):
     def _row(label, r):
         if not r:
-            return f"  {label:28s}: (no data)"
-        return (f"  {label:28s}: χ²/pixel {r['chi2_per_pixel']:7.3f}   "
+            return f"  {label:30s}: (no data)"
+        return (f"  {label:30s}: χ²/pixel {r['chi2_per_pixel']:7.3f}   "
                 f"ivar-R² {r['ivar_r2']:7.4f}   n={r['n']}")
 
     print("\n" + "=" * 64)
@@ -136,6 +143,10 @@ def _report_spectrum(vs, mask_ratio):
     print(_row("codec ceiling (all px)", vs["recon_codec"]))
     print(_row("predicted (masked blocks)", vs["recon_masked"]))
     print(_row("predicted (all px)", vs["recon_all"]))
+    if vb is not None:
+        print(f"  -- fully-blind AR (no teacher forcing): acc {vb['masked_token_acc']:.4f}")
+        print(_row("blind predicted (masked blk)", vb["recon_masked"]))
+        print(_row("blind predicted (all px)", vb["recon_all"]))
 
 
 def main():
@@ -192,12 +203,18 @@ def main():
         model, loader, spec_tok, z_tok, args.approach, device,
         amp=args.amp, amp_dtype=amp_dtype,
         encoder_mask_ratio=args.encoder_mask_ratio, max_batches=args.max_batches)
+    vb = None
+    if args.blind:
+        vb = evaluate_spectrum_blind(
+            model, loader, spec_tok, z_tok, args.approach, device,
+            encoder_mask_ratio=args.encoder_mask_ratio,
+            max_batches=args.blind_max_batches)
 
     print("\n" + "#" * 64)
     print(f"#  X9 OOD — {args.checkpoint.name} on SDSS (never trained on)")
     print("#" * 64)
     is_outlier, dz = _report_redshift(v)
-    _report_spectrum(vs, args.encoder_mask_ratio)
+    _report_spectrum(vs, args.encoder_mask_ratio, vb)
     print("\n" + "=" * 64)
     print("  σ_NMAD/η vs SpecPT (0.0006-0.0008 / 0.2-0.8%); χ²/pixel→1 = noise floor.")
 
