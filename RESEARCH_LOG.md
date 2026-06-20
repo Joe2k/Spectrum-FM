@@ -3248,5 +3248,27 @@ identically DESI↔SDSS), but the absolute number is optimistic. TODO: add a
 fully-blind autoregressive flux reconstruction (`model.generate`, no teacher forcing)
 and re-run DESI↔SDSS to settle the transfer claim properly.
 
+#### BLIND AR reconstruction — corrects the "spectrum transfers" claim
+
+Added a fully-blind AR flux reconstruction (`eval_spectrum.py --blind` / `evaluate_
+spectrum_blind`: `model.generate` greedy, no teacher forcing — masked tokens inferred
+from the masked encoder + the model's OWN generated history). DESI-vs-OOD, masked-block:
+
+| | teacher-forced ivar-R² | **fully-blind ivar-R²** |
+|---|---|---|
+| DESI in-dist | 0.9963 | **0.9953** (χ² 1.60) |
+| legacy SDSS 0266 | 0.9896 | **0.733** (χ² 37.96) |
+| eBOSS 10000 | 0.9836 | **0.941** (χ² 4.05) |
+
+**The teacher-forced OOD reconstruction (R² 0.98–0.99) was inflated by the decoder's
+true left-context.** Stripped of teacher forcing, OOD blind reconstruction degrades
+sharply (legacy R² 0.99→0.73, eBOSS 0.98→0.94) while DESI holds (0.995). So the earlier
+"spectrum reconstruction transfers OOD" claim is **overturned for the strict metric** —
+corrected story: *in-distribution everything works; OOD both redshift AND blind spectrum
+reconstruction degrade* (the model relies on DESI-specific instrument structure). The
+in-distribution blind number is genuine (DESI R² 0.995), confirming masking is real and
+the encoder does reconstruct from context — just not OOD. Credit: user challenged whether
+the encoder was actually masked, which led to building the blind eval.
+
 (Infra: Claude has direct NERSC ssh — `ssh -i ~/.ssh/nersc joe2k@perlmutter`, sshproxy
 cert ~24h; NERSC git remote is `origin`; runs on `-A deepsrch_g -C gpu -q interactive`.)
