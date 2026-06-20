@@ -64,6 +64,7 @@ def evaluate(
     max_batches: int = 50,
     amp_dtype: torch.dtype = torch.float16,
     return_per_sample: bool = False,
+    wavelength_aware: bool = False,
 ) -> Dict[str, float]:
     """Teacher-forced eval. Returns a dict of averaged metrics over up to
     `max_batches` batches from `loader`.
@@ -80,6 +81,9 @@ def evaluate(
     With `return_per_sample=True` the dict also carries the per-sample arrays
     (`z_pred`, `z_true`, `score`, `pit`, and the T=1 `probs` for offline
     temperature fitting) — omitted by default to keep the in-training val cheap.
+    `wavelength_aware=True` resamples each spectrum onto the fixed wavelength grid
+    (pass the batch's `wavelength`) instead of the legacy length-stretch — required
+    for any survey whose grid differs from DESI's (e.g. SDSS log-λ, the X9 OOD eval).
     """
     model.eval()
     losses = 0.0
@@ -107,6 +111,7 @@ def evaluate(
             raw, spec_tok, z_tok, approach, device,
             encoder_mask_ratio=encoder_mask_ratio,
             redshift_mask_ratio=redshift_mask_ratio,
+            wavelength_aware=wavelength_aware,
         )
         with torch.amp.autocast("cuda", enabled=amp, dtype=amp_dtype):
             logits, loss = model(enc, dec, targets=tgt, redshift_weight=redshift_weight,
