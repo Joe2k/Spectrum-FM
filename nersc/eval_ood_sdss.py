@@ -62,6 +62,9 @@ def parse_args():
     src.add_argument("--sdss-dir", type=Path, help="Directory of spec-*.fits.")
     src.add_argument("--sdss-manifest", type=Path,
                      help="Text file with one spec-*.fits path per line.")
+    p.add_argument("--glob", default="spec-*.fits",
+                   help="Glob for --sdss-dir. Use '**/spec-*.fits' to recurse the "
+                        "SDSS lite tree (spectra are nested in per-plate dirs).")
     p.add_argument("--approach", default="a", choices=["a", "b"])
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--num-workers", type=int, default=8)
@@ -164,7 +167,7 @@ def main():
         source = args.sdss_dir
     ds = SDSSSpectrumDataset(
         source, require_good_zwarn=args.require_good_zwarn,
-        require_nonzero_flux=True, max_spectra=args.max_spectra)
+        require_nonzero_flux=True, max_spectra=args.max_spectra, glob=args.glob)
     print(f"[ood] SDSS spectra loaded: {len(ds)}")
     if len(ds) == 0:
         print("[ood] no usable SDSS spectra — check --sdss-dir/--sdss-manifest "

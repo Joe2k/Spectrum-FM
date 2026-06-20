@@ -11,6 +11,15 @@ Living document of findings, decisions, and experimental results.
 **NERSC repo:** `$HOME/Spectrum-FM` = `/global/u1/j/joe2k/Spectrum-FM`
 **W&B:** entity `jjayaseelan-university-of-san-francisco`, project `redshifty`
 
+**External source data (NERSC CFS, read-only / public):**
+- **DESI DR1** (training corpus): `/global/cfs/cdirs/desi/public/dr1` (world-readable).
+  Spectra (prod = *iron*): `spectro/redux/iron/healpix/{survey}/{program}/{hpix_group}/{healpix}/`
+  (surveys `sv1/sv2/sv3/main`; programs `bright/dark/backup/other`). Redshift truth:
+  `zcatalog/v1/zall-pix-iron.fits` (~21 GB), per-program `zpix-{survey}-{program}.fits`.
+- **SDSS** (for OOD eval — out-of-scope for training, see X4 note): root
+  `/global/cfs/cdirs/sdss/data/sdss/` with releases `dr7`–`dr17` (also `eBOSS/`,
+  `staging/`, `www/` siblings under `/global/cfs/cdirs/sdss/`).
+
 **NERSC scratch** (`$SCRATCH` = `/pscratch/sd/j/joe2k`):
 - Manifest: `$SCRATCH/manifests/dr1_v2_full.jsonl`
 - X1 token cache (v2 tokens): `$SCRATCH/dr1_tokenized_v2`
@@ -22,6 +31,12 @@ Living document of findings, decisions, and experimental results.
 
 **Release checkpoints (in-repo):** `checkpoints/release/` — incl.
 `spectrum_tokenizer_v2/best.pt`, `approach_a_fm_v1_10k_a_ddp4_redmask50_v9/` (v9, v1 tokens).
+
+**SDSS OOD data (NERSC CFS):** `/global/cfs/cdirs/sdss/data/sdss/dr{7..17}/` — spec-lite
+coadds at `.../spectro/redux/<RUN2D>/spectra/lite/<PLATE>/spec-<PLATE>-<MJD>-<FIBER>.fits`
+(legacy under `dr17/sdss/...`, BOSS/eBOSS under `dr17/eboss/...`). Read by
+`src/utils/sdss.py`; point `eval_ood_sdss.py --sdss-dir` at a `lite/<PLATE>` dir or the
+`lite/` root with `--glob '**/spec-*.fits'`.
 
 **Runs:**
 - 4096-soft = THE model: run `approach_a_v2cache_x2x3_ddp4`, W&B `aqxmwgl1` (finished 200k)
