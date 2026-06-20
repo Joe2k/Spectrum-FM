@@ -3163,3 +3163,26 @@ degrade, noise injection, flux-scale + wavelength-grid jitter) so the model stop
 relying on DESI's exact instrument response — targets the redshift OOD gap
 directly. Spectrum side needs nothing.** Per-sample arrays:
 `$SCRATCH/x9_sdss_dr17_p0266.npz`.
+
+#### Δz-vs-z diagnostic (plate 0266) — it's prior-pull + z-extremes, not a flat offset
+
+| z bin | n | median Δz | σ_NMAD |
+|---|---|---|---|
+| [0,0.1) | 404 | **+0.0046** | 0.0068 |
+| [0.1,0.2) | 335 | +0.0013 | **0.0023** |
+| [0.2,0.4) | 132 | +0.0009 | 0.0038 |
+| [0.4,0.7) | 53 | −0.0017 | 0.0046 |
+| [0.7,5) | 44 | **−0.0297** | 0.0483 |
+
+The bias **flips sign with z** (over-predict low-z, under-predict high-z) ⇒ not a
+constant frame/velocity offset (that would be constant in Δz) but **regression
+toward DESI's training z-prior** (the z-tokenizer CDF bakes it in). This plate is
+**74% low-z (z<0.2)** — the model's worst regime — which inflates the headline
+σ_NMAD/η. The **z[0.1,0.2) bin is fine (σ_NMAD 0.0023, bias +0.0013, ~3× SpecPT)**;
+the failures concentrate at the extremes: z<0.1 (tiny line shifts × SDSS's lower
+resolution) and z>0.7 QSOs (broad lines, rare at SDSS resolution). Revised read:
+redshift generalizes *except at z-extremes on a low-z-dominated, lower-resolution
+plate*. **Decisive test = eBOSS** (z~0.6–1.5 LRG/QSO, the DESI-trained range, +a
+different spectrograph): if it looks much better, the gap is resolution-mismatch +
+prior-pull at extremes, and the targeted fix is resolution/LSF + flux augmentation
+fine-tuning (still on the on-the-fly path, since the X1 cache holds tokens not flux).
