@@ -11,6 +11,17 @@ Living document of findings, decisions, and experimental results.
 **NERSC repo:** `$HOME/Spectrum-FM` = `/global/u1/j/joe2k/Spectrum-FM`
 **W&B:** entity `jjayaseelan-university-of-san-francisco`, project `redshifty`
 
+**SSH access to NERSC (from mac):** auth = NERSC sshproxy short-lived cert (24h).
+- Client: `~/.local/bin/sshproxy` (v2.1.2, extracted from
+  `sshproxy-2.1.2-macos-universal.pkg` @ `https://portal.nersc.gov/cfs/mfa/`).
+- Issue/renew cert (interactive, password+OTP): `~/.local/bin/sshproxy -u joe2k`
+  → writes `~/.ssh/nersc{,.pub,-cert.pub}`. Re-run when login fails (~24h expiry).
+- `~/.ssh/config` hosts: `perlmutter` (`perlmutter.nersc.gov`) and `nersc-dtn`
+  (`dtn01.nersc.gov`), both `User joe2k`, `IdentityFile ~/.ssh/nersc`.
+- Host key verified vs NERSC docs: RSA `SHA256:Db9s2Fa4J3qx7An5oIMgUqUAdK7UWJGTPGoIKD44+Gs`.
+- Usage: `ssh perlmutter '<cmd>'`. Keep real work on Slurm (`sbatch`/`salloc`),
+  not login nodes.
+
 **External source data (NERSC CFS, read-only / public):**
 - **DESI DR1** (training corpus): `/global/cfs/cdirs/desi/public/dr1` (world-readable).
   Spectra (prod = *iron*): `spectro/redux/iron/healpix/{survey}/{program}/{hpix_group}/{healpix}/`
@@ -3186,3 +3197,56 @@ plate*. **Decisive test = eBOSS** (z~0.6–1.5 LRG/QSO, the DESI-trained range, 
 different spectrograph): if it looks much better, the gap is resolution-mismatch +
 prior-pull at extremes, and the targeted fix is resolution/LSF + flux augmentation
 fine-tuning (still on the on-the-fly path, since the X1 cache holds tokens not flux).
+
+#### X9 eBOSS RESULT — redshift readout COLLAPSES to the DESI prior (run via direct NERSC ssh)
+
+eBOSS DR17 plate 10000 (1000 spectra, SPALL-HDU fix `4bddb95`), GPU interactive node.
+The hypothesis was *wrong* — eBOSS is far **worse**, and that is the finding.
+
+| metric | DESI in-dist | SDSS legacy 0266 | **eBOSS 10000** |
+|---|---|---|---|
+| redshift σ_NMAD | 0.00046 | 0.0037 | **0.147** |
+| redshift η>0.0033 / η>0.05 | 9% / 3% | 45% / 7% | **91% / 68%** |
+| redshift bias | +1e-5 | +0.0020 | **−0.057** |
+| spectrum masked ivar-R² | 0.9976 | 0.9891 | **0.9829** |
+| PIT KS → X8c (held-out) | 0.244 | 0.307→0.064 | 0.123→**0.070** |
+
+z_pred-vs-z_true is the smoking gun — **z_pred clamps to ~0.4–0.9 regardless of
+truth**: stars(z≈0)→0.19, z[1,1.5]→0.52, z[1.5,2.5]→0.93, z[2.5,6]→0.79. Legacy
+SDSS (low-z) over-predicts; eBOSS (high-z) under-predicts — **both regress toward
+DESI's training-prior mode (~z 0.5–0.9)**. Off DESI's instrument the model can't
+locate lines confidently, the likelihood goes flat, and the posterior → prior.
+
+**Dichotomy, now decisive across two spectrographs:** spectrum reconstruction
+transfers (ivar-R² 0.983–0.998), redshift does not (collapses to prior). That's
+the generalization story *and* the one clear weakness. THE justified GPU run =
+instrument-robustness fine-tune from `best.pt` with flux/instrument augmentation
+(LSF/resolution degrade, noise, flux-scale + λ-grid jitter), measure-first probed
+by degrading DESI val to SDSS resolution. Per-sample: `$SCRATCH/x9_eboss_10000.npz`.
+
+#### Masking-validity control (user challenge) — encoder IS masked; metric is teacher-forced
+
+Swept `eval_spectrum.py --encoder-mask-ratio` on DESI val to verify the masked
+reconstruction isn't just copying a fully-visible encoder:
+
+| mask | token acc | codec ceiling χ² | predicted masked-blocks χ²·R² | predicted **all-px** χ² |
+|---|---|---|---|---|
+| 0.15 | 0.297 | 1.225 | 1.508 · 0.9960 | 1.257 |
+| 0.50 | 0.290 | 1.225 | 1.480 · 0.9960 | 1.358 |
+| 0.90 | 0.281 | 1.225 | 1.517 · 0.9960 | **1.495** |
+
+**Masking is real:** all-px χ² rises monotonically 1.26→1.50 as encoder masking goes
+15%→90% (would stay at the codec ceiling 1.225 if the encoder saw everything), and
+token acc is 0.28 not ~1.0. **But the caveat the user caught:** the *masked-block*
+χ² is flat (~1.5) across mask ratios ⇒ each hidden token is reconstructed about
+equally well regardless of how much context is hidden ⇒ the prediction leans on the
+**decoder's teacher-forced true left-context** (AR history), not the encoder's
+surrounding context. So X10's "blind reconstruction R² 0.998" is the *teacher-forced*
+masked_spec_acc analog — a legit upper bound, **not fully blind**, and it doesn't
+cleanly isolate the encoder. The OOD comparison stays valid (teacher forcing applies
+identically DESI↔SDSS), but the absolute number is optimistic. TODO: add a
+fully-blind autoregressive flux reconstruction (`model.generate`, no teacher forcing)
+and re-run DESI↔SDSS to settle the transfer claim properly.
+
+(Infra: Claude has direct NERSC ssh — `ssh -i ~/.ssh/nersc joe2k@perlmutter`, sshproxy
+cert ~24h; NERSC git remote is `origin`; runs on `-A deepsrch_g -C gpu -q interactive`.)
