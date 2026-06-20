@@ -3062,3 +3062,45 @@ The only meaningful in-distribution GPU lever left is a lower codec floor
 (tokenizer v3) — a big effort for ~0.16 χ², not warranted now.
 
 Paths used recorded in the **Canonical paths** section at the top.
+
+---
+
+## 2026-06-19: X9 — SDSS out-of-distribution eval stack (tooling; awaiting data)
+
+Built the reusable OOD harness that runs the *complete* eval on SDSS spectra the
+model never trained on — the generalization headline. Notebooks left untouched
+(per request); this is importable so the local notebook (or a NERSC run) can call
+it. SDSS's log-λ grid / different coverage / flux calibration are handled by the
+tokenizer's wavelength-aware `resample_to_grid` — nothing here is DESI-specific.
+
+- `src/training/eval.py::evaluate(..., wavelength_aware=False)` — new flag threaded
+  to `tokenize_and_build`. Default preserves behaviour; **required** for any survey
+  off DESI's grid. (Also the correct setting for on-the-fly DESI, matching how the
+  X1 cache was built.)
+- `src/utils/sdss.py` (new, torch+astropy, notebook-importable): `read_sdss_spec_fits`
+  (standard `spec-*.fits`: COADD `flux`/`loglam`/`ivar`, SPECOBJ `Z`/`ZWARNING`;
+  λ = 10**loglam, ascending; column/HDU names overridable for survey variants),
+  `SDSSSpectrumDataset` (zwarn/finite-z/nonzero-flux filters, dir-glob or path list),
+  `collate_sdss_skip_none` (mirrors the DESI padding — ivar-0 pad, ascending λ).
+  Emits the same `{flux,ivar,wavelength,z}` dict the rest of the stack consumes.
+- `nersc/eval_ood_sdss.py` (new): loads the transformer + z-tok + spectrum tokenizer
+  v2, builds the SDSS loader (`--sdss-dir` or `--sdss-manifest`), and reuses
+  `evaluate(wavelength_aware=True, redshift_mask_ratio=1.0)` (σ_NMAD + `posterior_
+  std_z` rejection table + AUROC + PIT + X8c held-out recalibration) **and**
+  `evaluate_spectrum()` (X10 flux χ²/pixel + ivar-R²) — one combined OOD report,
+  σ_NMAD/η printed against the SpecPT bar. Needs `--tokenizer-ckpt` (on-the-fly:
+  raw flux + decoder).
+
+Tests `tests/test_sdss_loader.py` (7, green; full suite 248 pass, only the
+pre-existing wandb-key env test fails): synthesizes real SDSS FITS via astropy —
+read keys/λ=10**loglam, descending-λ flip, bad-file→None, zwarn/zero-flux
+filtering, getitem keys, padding collate (ascending λ, ivar-0 tail), all-None→None.
+
+**Status: awaiting the SDSS data location.** The loader expects standard
+`spec-*.fits`; point `--sdss-dir` at a directory of them (or `--sdss-manifest` at a
+path list). No SDSS FITS are in the repo / on the paths we use yet — once the
+directory is known, record it in the Canonical paths section and run. Expected
+read: σ_NMAD vs SpecPT (0.0006–0.0008), how far `posterior_std_z` rejection +
+X8c recalibration transfer OOD, and flux ivar-R² vs the in-distribution 0.9976.
+If it holds → headline; if it degrades → defines the one justified GPU run
+(flux-domain augmentation / robustness).
