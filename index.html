@@ -1,0 +1,30 @@
+<!doctype html><html><head><meta charset="utf-8">
+<title>DESI Spectrum FM — Blind Redshift (interactive)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+max-width:900px;margin:40px auto;padding:0 18px;color:#1a1a1a;line-height:1.5}
+h1{font-size:24px;margin-bottom:4px} .sub{color:#666;margin-top:0}
+table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14px}
+th,td{border:1px solid #ddd;padding:8px 10px;text-align:left}
+th{background:#222;color:#fff} tr:nth-child(even){background:#fafafa}
+a{color:#0b66c2;text-decoration:none} a:hover{text-decoration:underline}
+code{background:#f2f2f2;padding:1px 5px;border-radius:4px}
+.note{background:#f6f8fa;border-left:3px solid #0b66c2;padding:10px 14px;font-size:14px;margin:16px 0}
+</style></head><body>
+<h1>DESI Spectrum Foundation Model — Blind Redshift</h1>
+<p class="sub">Interactive scatter of predicted vs. true redshift. The full spectrum is
+shown to the model and only the redshift is hidden. Pan, scroll to zoom, box/lasso-select;
+hover any point for its true z, predicted z, and normalized error Δz/(1+z). Points are
+colored by Δz/(1+z) (red/blue = outliers).</p>
+<table>
+<tr><th>Model</th><th>Dataset</th><th>N</th><th>σ_NMAD</th><th>η&nbsp;(|Δz/(1+z)|&gt;0.0033)</th><th>Plot</th></tr>
+<tr><td>Transformer V3 (4096-bin soft)</td><td>DESI DR1 held-out val split</td><td>500,000</td><td>0.00090</td><td>17.8%</td><td><a href='v3_val.html'>open ↗</a></td></tr><tr><td>Transformer V3 (4096-bin soft)</td><td>SDSS out-of-distribution</td><td>23,419</td><td>0.08409</td><td>91.3%</td><td><a href='v3_sdss.html'>open ↗</a></td></tr><tr><td>Transformer V2 (512-bin hard)</td><td>DESI DR1 held-out val split</td><td>500,000</td><td>0.00101</td><td>26.2%</td><td><a href='v2_val.html'>open ↗</a></td></tr><tr><td>Transformer V2 (512-bin hard)</td><td>SDSS out-of-distribution</td><td>23,419</td><td>0.21422</td><td>96.4%</td><td><a href='v2_sdss.html'>open ↗</a></td></tr>
+</table>
+<div class="note">σ_NMAD (lower = better) is the robust scatter; η is the catastrophic-outlier
+fraction. Predictions saturate at z≈2 because &lt;3% of DESI DR1 lies above z=2 and the
+strong redshift-bearing lines leave DESI's 3600–9800&nbsp;Å window beyond z≈2 — so the
+high-z bins are undertrained and the expected-value decode caps out there.</div>
+<p class="sub" style="font-size:13px">Generated from the DR1 val split (965,897 spectra) and
+an SDSS OOD sample (23,419). Tokenizer v2, encoder–decoder transformer (~100M params).</p>
+</body></html>
