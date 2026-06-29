@@ -22,7 +22,7 @@ a fresh login to a submitted job lives in this folder.
 ## Quickstart
 
 You need: a NERSC account on Perlmutter and an allocation under project
-**`deepsrch`** (GPU jobs use the `_g` suffix → `deepsrch_g`).
+**`deepsrch`** (GPU jobs use the `_g` suffix → `m5374_g`).
 
 ```bash
 # 0. ssh in, clone the repo onto $HOME or $CFS
@@ -46,7 +46,7 @@ the same with a 2000-healpix manifest.
 
 ## Account / QOS notes
 
-- All scripts default to `--account=deepsrch_g`. If your allocation has a
+- All scripts default to `--account=m5374_g`. If your allocation has a
   different GPU project name, override per-submission:
   ```bash
   sbatch -A <other_account> nersc/smoke_tokenizer.slurm
@@ -69,13 +69,13 @@ Perlmutter has three filesystems. We use them like this:
 | `$HOME` | the cloned repo only | small (40 GB quota) — **don't put checkpoints here** |
 | `$SCRATCH/deepsrch/` | manifests, checkpoints, logs *during* training | high-perf Lustre |
 | `$CFS/desi/public/dr1` | the dataset (read-only) | already there, world-readable |
-| `/global/cfs/cdirs/deepsrch/$USER/checkpoints/<run>/` | best/final checkpoint mirror | multi-TB project quota, survives `$SCRATCH` purge |
+| `/global/cfs/cdirs/m5374/$USER/checkpoints/<run>/` | best/final checkpoint mirror | multi-TB project quota, survives `$SCRATCH` purge |
 
 **Why not mirror to the repo under `$HOME/redshifty/checkpoints/`?** Because
 `$HOME` is 40 GB. With ~300 MB best.pt files written on every val-loss
 improvement, you'll exhaust quota mid-run and the training process will
 crash on `OSError: [Errno 122] Disk quota exceeded`. The SLURM scripts
-default `CFS_OUT` to `/global/cfs/cdirs/deepsrch/$USER/checkpoints/$RUN_NAME`
+default `CFS_OUT` to `/global/cfs/cdirs/m5374/$USER/checkpoints/$RUN_NAME`
 for this reason. As a safety net, both trainers also wrap the mirror in a
 try/except since Phase 10 — a failed mirror prints a warning but does not
 kill the training process.

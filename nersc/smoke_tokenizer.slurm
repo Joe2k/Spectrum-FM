@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -A deepsrch_g
+#SBATCH -A m5374_g
 #SBATCH -C gpu
 #SBATCH -q shared
 #SBATCH --nodes=1
@@ -18,7 +18,7 @@
 # Submit from the repo root:
 #     sbatch nersc/smoke_tokenizer.slurm
 #
-# If `--account=deepsrch_g` is wrong for your allocation, override at
+# If `--account=m5374_g` is wrong for your allocation, override at
 # submit time:  sbatch -A <other_account> nersc/smoke_tokenizer.slurm
 
 set -euo pipefail

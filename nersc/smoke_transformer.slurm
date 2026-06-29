@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -A deepsrch_g
+#SBATCH -A m5374_g
 #SBATCH -C gpu
 #SBATCH -q shared
 #SBATCH --nodes=1

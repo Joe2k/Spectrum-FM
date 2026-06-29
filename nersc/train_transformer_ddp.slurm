@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -A deepsrch_g
+#SBATCH -A m5374_g
 #SBATCH -C gpu
 #SBATCH -q regular
 #SBATCH --nodes=1
@@ -95,7 +95,7 @@ if [ -n "${TOKENIZED_DIR:-}" ]; then
 else
     MANIFEST="${MANIFEST:-$SCRATCH_OUT/manifests/dr1_${MAX_HEALPIX}.jsonl}"
 fi
-DEFAULT_CFS_BASE="/global/cfs/cdirs/deepsrch/$USER/checkpoints"
+DEFAULT_CFS_BASE="/global/cfs/cdirs/m5374/$USER/checkpoints"
 CFS_OUT="${CFS_OUT:-$DEFAULT_CFS_BASE/$RUN_NAME}"
 
 echo "[train-ddp] approach=$APPROACH run=$RUN_NAME"

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -A deepsrch_g
+#SBATCH -A m5374_g
 #SBATCH -C gpu
 #SBATCH -q shared
 #SBATCH --nodes=1
@@ -71,7 +71,7 @@ WANDB_PROJECT="${WANDB_PROJECT:-redshifty}"
 MANIFEST="${MANIFEST:-$SCRATCH_OUT/manifests/dr1_${MAX_HEALPIX}.jsonl}"
 # CFS mirror lives under the project CFS dir (deepsrch has multi-TB quota)
 # rather than $HOME (40 GB quota -> fills up fast with ~300 MB checkpoints).
-DEFAULT_CFS_BASE="/global/cfs/cdirs/deepsrch/$USER/checkpoints"
+DEFAULT_CFS_BASE="/global/cfs/cdirs/m5374/$USER/checkpoints"
 CFS_OUT="${CFS_OUT:-$DEFAULT_CFS_BASE/$RUN_NAME}"
 
 echo "[train] approach=$APPROACH run=$RUN_NAME"

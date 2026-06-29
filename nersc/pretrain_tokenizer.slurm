@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -A deepsrch_g
+#SBATCH -A m5374_g
 #SBATCH -C gpu
 #SBATCH -q shared
 #SBATCH --nodes=1
@@ -51,7 +51,7 @@ BUILD_FLAGS=""
 # otherwise a fresh one is built under a job-id name.
 MANIFEST="${MANIFEST:-$SCRATCH_OUT/manifests/dr1_${SLURM_JOB_ID}.jsonl}"
 # CFS mirror lives under the project CFS dir (multi-TB quota), not $HOME (40 GB).
-DEFAULT_CFS_BASE="/global/cfs/cdirs/deepsrch/$USER/checkpoints"
+DEFAULT_CFS_BASE="/global/cfs/cdirs/m5374/$USER/checkpoints"
 CFS_OUT="${CFS_OUT:-$DEFAULT_CFS_BASE/$RUN_NAME}"
 
 echo "[pretrain] run_name=$RUN_NAME"
