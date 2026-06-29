@@ -41,6 +41,9 @@ def tokenize_and_build(
     rng: Optional[torch.Generator] = None,
     wavelength_aware: bool = False,
     mask_targets_only: bool = False,
+    decouple_masks: bool = False,
+    blind_z_frac: float = 0.5,
+    recon_z_shown_frac: float = 0.5,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Convert a raw spectrum batch into transformer-ready sequences.
 
@@ -81,6 +84,30 @@ def tokenize_and_build(
             > 0` to have any effect; with no encoder masking `masked_positions`
             is None and this is a no-op. Default False = supervise every
             spectrum position (legacy behavior).
+        decouple_masks: Approach-A only. When True, replace the two
+            INDEPENDENT masks (which let a "predict-z" example also have a
+            half-masked spectrum) with a per-sample three-mode split:
+              * Z-task (prob `blind_z_frac`): encoder spectrum UNMASKED,
+                redshift -> REDMASK. Redshift is supervised (position 0);
+                the spectrum block is all -100 (nothing to reconstruct).
+                z is supervised ONLY in this mode, always from a full
+                spectrum — matching inference-time blind-z.
+              * Recon+z-shown (prob `(1-blind_z_frac)*recon_z_shown_frac`):
+                encoder spectrum masked per `encoder_mask_ratio`, redshift
+                token SHOWN (true z). Spectrum supervised; position-0
+                redshift target -> -100 (no trivial z-copy gradient).
+              * Recon+z-hidden (the remainder): encoder spectrum masked,
+                redshift -> REDMASK. Spectrum supervised; position-0 -> -100.
+            Requires `mask_targets_only=True` and `encoder_mask_ratio>0` for
+            the recon modes to supervise anything. Ignored for Approach B.
+            Default False = legacy independent masks.
+        blind_z_frac: fraction of samples that are the Z-task (full
+            spectrum, predict z). Only used when `decouple_masks=True`.
+        recon_z_shown_frac: within the recon samples, fraction that SHOW the
+            true z to the encoder. 0.0 => z hidden everywhere (pure
+            foundation-model "always predict z, never given" objective);
+            recon eval (z hidden) is then exactly in-distribution. Only used
+            when `decouple_masks=True`.
 
     Returns:
         encoder_input: (B, L_enc) long tensor.
@@ -97,6 +124,11 @@ def tokenize_and_build(
         raise ValueError(f"encoder_mask_ratio must be in [0, 1], got {encoder_mask_ratio}")
     if not 0.0 <= redshift_mask_ratio <= 1.0:
         raise ValueError(f"redshift_mask_ratio must be in [0, 1], got {redshift_mask_ratio}")
+    if decouple_masks:
+        if not 0.0 <= blind_z_frac <= 1.0:
+            raise ValueError(f"blind_z_frac must be in [0, 1], got {blind_z_frac}")
+        if not 0.0 <= recon_z_shown_frac <= 1.0:
+            raise ValueError(f"recon_z_shown_frac must be in [0, 1], got {recon_z_shown_frac}")
 
     z_vals = raw_batch["z"]  # may stay on CPU; encode is per-item
 
@@ -135,31 +167,48 @@ def tokenize_and_build(
     eos = torch.full((B, 1), EOS_TOKEN, dtype=torch.long, device=device)
     rz = redshift_tokens.unsqueeze(1)  # (B, 1)
 
+    def _rand(*shape):
+        if rng is None:
+            return torch.rand(*shape, device=device)
+        return torch.rand(*shape, device=device, generator=rng)
+
     # Apply masking to the encoder's spectrum tokens only.
     masked_positions: Optional[torch.Tensor] = None
     spec_tokens_enc = spec_tokens
-    if encoder_mask_ratio > 0.0:
-        if rng is None:
-            mask = torch.rand(B, T_spec, device=device) < encoder_mask_ratio
-        else:
-            mask = torch.rand(B, T_spec, device=device, generator=rng) < encoder_mask_ratio
-        masked_positions = mask
-        spec_tokens_enc = torch.where(
-            mask,
-            torch.full_like(spec_tokens, MASK_TOKEN),
-            spec_tokens,
-        )
+    is_recon: Optional[torch.Tensor] = None  # set in decoupled mode; (B,1) bool
 
-    # Redshift conditioning dropout (Approach A only): replace the encoder's
-    # redshift token with REDMASK so the model must infer z from the spectrum
-    # rather than copy it. decoder_input/target keep the true rz below.
-    rz_enc = rz
-    if approach == "a" and redshift_mask_ratio > 0.0:
-        if rng is None:
-            rmask = torch.rand(B, 1, device=device) < redshift_mask_ratio
-        else:
-            rmask = torch.rand(B, 1, device=device, generator=rng) < redshift_mask_ratio
-        rz_enc = torch.where(rmask, torch.full_like(rz, REDMASK_TOKEN), rz)
+    if decouple_masks and approach == "a":
+        # Three-mode per-sample split (see docstring). z is supervised ONLY in
+        # the Z-task (full spectrum); the recon modes supervise the spectrum.
+        is_ztask = _rand(B, 1) < blind_z_frac          # full spectrum, predict z
+        is_recon = ~is_ztask
+        # Within recon, whether the encoder is shown the TRUE z.
+        show_z = is_recon & (_rand(B, 1) < recon_z_shown_frac)
+
+        # Spectrum mask: only recon rows get masked; Z-task rows stay full.
+        if encoder_mask_ratio > 0.0:
+            mask = (_rand(B, T_spec) < encoder_mask_ratio) & is_recon  # (B,1)->(B,T)
+            masked_positions = mask
+            spec_tokens_enc = torch.where(
+                mask, torch.full_like(spec_tokens, MASK_TOKEN), spec_tokens)
+
+        # Redshift visible to the encoder only when (recon AND show_z).
+        rz_enc = torch.where(~show_z, torch.full_like(rz, REDMASK_TOKEN), rz)
+    else:
+        # Legacy: the two masks are drawn INDEPENDENTLY.
+        if encoder_mask_ratio > 0.0:
+            mask = _rand(B, T_spec) < encoder_mask_ratio
+            masked_positions = mask
+            spec_tokens_enc = torch.where(
+                mask, torch.full_like(spec_tokens, MASK_TOKEN), spec_tokens)
+
+        # Redshift conditioning dropout (Approach A only): replace the encoder's
+        # redshift token with REDMASK so the model must infer z from the
+        # spectrum rather than copy it. decoder_input/target keep the true rz.
+        rz_enc = rz
+        if approach == "a" and redshift_mask_ratio > 0.0:
+            rmask = _rand(B, 1) < redshift_mask_ratio
+            rz_enc = torch.where(rmask, torch.full_like(rz, REDMASK_TOKEN), rz)
 
     if approach == "a":
         encoder_input = torch.cat([sos, rz_enc, spec_tokens_enc, eos], dim=1)
@@ -177,6 +226,12 @@ def tokenize_and_build(
     if mask_targets_only and masked_positions is not None:
         spec_target = target[:, 1:1 + T_spec]
         spec_target[~masked_positions] = -100
+
+    if decouple_masks and is_recon is not None:
+        # Supervise z (position 0) ONLY in the Z-task rows (full spectrum).
+        # Recon rows — whether z was shown or hidden — get position-0 -> -100,
+        # so the redshift gradient never comes from a half-masked spectrum.
+        target[is_recon.squeeze(1), 0] = -100
 
     return encoder_input, decoder_input, target, masked_positions
 

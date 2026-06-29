@@ -104,6 +104,12 @@ def parse_args():
                         "~0.001-level bin width, matching spectroscopic z "
                         "precision. Grows the vocab to 1032 + z_bins, so "
                         "checkpoints with different --z-bins are incompatible.")
+    p.add_argument("--z-gaussian-range", type=float, default=3.0,
+                   help="FSQ half-range for the redshift tokenizer. The top bin "
+                        "decodes to the Phi(range) percentile of the fitted z, so "
+                        "this sets the max emittable z (the prediction ceiling). "
+                        "Default 3.0 (Phi=0.99865 -> z~2.1 on DESI); z-v2 uses 4.0 "
+                        "(-> z~4.4) to lift the QSO ceiling. See RESEARCH_LOG Z1.")
 
     # Approach
     p.add_argument("--approach", choices=["a", "b"], required=True)
@@ -166,7 +172,31 @@ def parse_args():
                         "predict z from the spectrum instead of copying it. "
                         "0.0 disables (z always visible = copy path open); "
                         "0.5 = z hidden half the time. Eval/inference always "
-                        "hide z (ratio 1.0).")
+                        "hide z (ratio 1.0). Ignored when --decouple-masks is set "
+                        "(the mode split governs z visibility instead).")
+    p.add_argument("--decouple-masks", action="store_true",
+                   help="Approach A only. Replace the two INDEPENDENT masks "
+                        "(which let a predict-z example also have a half-masked "
+                        "spectrum) with a per-sample three-mode split: Z-task "
+                        "(full spectrum, predict z), recon+z-shown, recon+z-hidden. "
+                        "Redshift is supervised ONLY in the Z-task, always from a "
+                        "full spectrum. Needs --masked-targets-only and an encoder "
+                        "mask > 0. Default off (legacy independent masks).")
+    p.add_argument("--blind-z-frac", type=float, default=0.5,
+                   help="With --decouple-masks: fraction of samples that are the "
+                        "Z-task (full spectrum, predict z). The rest are recon.")
+    p.add_argument("--recon-z-shown-frac", type=float, default=0.5,
+                   help="With --decouple-masks: within the recon samples, fraction "
+                        "that SHOW the true z to the encoder. 0.0 => z hidden "
+                        "everywhere (pure 'always predict z, never given' FM "
+                        "objective; recon eval is then exactly in-distribution).")
+    p.add_argument("--two-pass-val", action="store_true",
+                   help="Log validation as TWO clean passes — val_z/* (full "
+                        "spectrum, z hidden) and val_recon/* (spectrum masked, z "
+                        "hidden) — instead of one half-masked pass. best.pt is "
+                        "selected on the val_z (redshift) loss. Implied by "
+                        "--decouple-masks; set it on the independent-mask control "
+                        "arm too so the two arms log comparable val_z numbers.")
     p.add_argument("--redshift-soft-sigma", type=float, default=0.0,
                    help="If >0, the redshift (position-0) loss uses Gaussian "
                         "soft labels with this std (in bins) instead of hard "
@@ -261,6 +291,21 @@ def main():
                 f"mask-ratio-max ({args.mask_ratio_max}) <= 1"
             )
 
+    # Decoupled three-mode masking presupposes Approach A (encoder z token),
+    # MAE supervision (so Z-task rows supervise nothing in the spectrum), and a
+    # non-zero encoder mask (so the recon modes have masked positions to learn).
+    if args.decouple_masks:
+        if args.approach != "a":
+            raise ValueError("--decouple-masks requires --approach a")
+        if not args.masked_targets_only:
+            raise ValueError("--decouple-masks requires --masked-targets-only")
+        eff_max_mask = args.mask_ratio_max if args.variable_mask else args.encoder_mask_ratio
+        if not eff_max_mask or eff_max_mask <= 0.0:
+            raise ValueError(
+                "--decouple-masks needs an encoder mask > 0 "
+                "(set --encoder-mask-ratio or --mask-ratio-min/max)"
+            )
+
     # Detect DDP: either explicit RANK env var (from SLURM script exports)
     # or SLURM's native SLURM_PROCID (from interactive srun).
     is_distributed = "RANK" in os.environ or "SLURM_PROCID" in os.environ
@@ -348,7 +393,7 @@ def main():
     if len(zs) < 20 * args.z_bins:
         print(f"[tok]   WARN: only {len(zs)} z values for {args.z_bins} bins "
               f"(<20 per quantile); raise --z-fit-files for stable bin edges")
-    z_tok = RedshiftTokenizer(n_levels=args.z_bins)
+    z_tok = RedshiftTokenizer(n_levels=args.z_bins, gaussian_range=args.z_gaussian_range)
     z_tok.fit(zs)
     # Bin-width report: bins are CDF-equalized (equal probability mass), so
     # width varies with the z density — verify the precision actually achieved.
@@ -525,6 +570,9 @@ def main():
             encoder_mask_ratio=mask_ratio,
             redshift_mask_ratio=args.redshift_mask_ratio,
             mask_targets_only=args.masked_targets_only,
+            decouple_masks=args.decouple_masks,
+            blind_z_frac=args.blind_z_frac,
+            recon_z_shown_frac=args.recon_z_shown_frac,
         )
 
         optim.zero_grad(set_to_none=True)
@@ -607,23 +655,59 @@ def main():
             }, step=step)
 
         if rank == 0 and step > 0 and step % args.val_every == 0:
-            # Hide z from the encoder (ratio 1.0) so the redshift metrics
-            # reflect the honest inference-time, predict-z-from-spectrum case.
-            v = evaluate(
-                model.module if is_distributed else model,
-                val_loader, spec_tok, z_tok, args.approach, device,
-                args.amp, args.redshift_loss_weight,
-                encoder_mask_ratio=args.encoder_mask_ratio,
-                redshift_mask_ratio=1.0,
-                redshift_soft_sigma=args.redshift_soft_sigma,
-                amp_dtype=amp_dtype,
-            )
-            model.train()
-            print(f"[val   {step:6d}] " + " ".join(f"{k}={v[k]:.4f}" for k in v))
-            with metrics_path.open("a") as f:
-                f.write(json.dumps({"kind": "val", "step": step,
-                                    **{f"val_{k}": vv for k, vv in v.items()}}) + "\n")
-            wlog(wandb_run, {f"val/{k}": vv for k, vv in v.items()}, step=step)
+            # z is hidden (ratio 1.0) so the redshift metrics reflect the honest
+            # inference-time, predict-z-from-spectrum case.
+            if args.decouple_masks or args.two_pass_val:
+                # Two CLEAN passes matching the decoupled objective + inference:
+                #   val_z    : full spectrum, z hidden -> redshift metrics (headline)
+                #   val_recon: spectrum masked, z hidden -> reconstruction metrics
+                # (vs the legacy single half-masked pass, which computed the
+                # redshift number from a partially-missing spectrum.)
+                vz = evaluate(
+                    model.module if is_distributed else model,
+                    val_loader, spec_tok, z_tok, args.approach, device,
+                    args.amp, args.redshift_loss_weight,
+                    encoder_mask_ratio=0.0,
+                    redshift_mask_ratio=1.0,
+                    redshift_soft_sigma=args.redshift_soft_sigma,
+                    amp_dtype=amp_dtype,
+                )
+                vr = evaluate(
+                    model.module if is_distributed else model,
+                    val_loader, spec_tok, z_tok, args.approach, device,
+                    args.amp, args.redshift_loss_weight,
+                    encoder_mask_ratio=args.encoder_mask_ratio,
+                    redshift_mask_ratio=1.0,
+                    redshift_soft_sigma=args.redshift_soft_sigma,
+                    amp_dtype=amp_dtype,
+                )
+                model.train()
+                v = vz  # headline = redshift task; drives best.pt selection below
+                print(f"[val   {step:6d}] "
+                      + "z:" + " ".join(f"{k}={vz[k]:.4f}" for k in vz)
+                      + " | recon:" + " ".join(f"{k}={vr[k]:.4f}" for k in vr))
+                with metrics_path.open("a") as f:
+                    f.write(json.dumps({"kind": "val", "step": step,
+                                        **{f"val_z_{k}": vv for k, vv in vz.items()},
+                                        **{f"val_recon_{k}": vv for k, vv in vr.items()}}) + "\n")
+                wlog(wandb_run, {**{f"val_z/{k}": vv for k, vv in vz.items()},
+                                 **{f"val_recon/{k}": vv for k, vv in vr.items()}}, step=step)
+            else:
+                v = evaluate(
+                    model.module if is_distributed else model,
+                    val_loader, spec_tok, z_tok, args.approach, device,
+                    args.amp, args.redshift_loss_weight,
+                    encoder_mask_ratio=args.encoder_mask_ratio,
+                    redshift_mask_ratio=1.0,
+                    redshift_soft_sigma=args.redshift_soft_sigma,
+                    amp_dtype=amp_dtype,
+                )
+                model.train()
+                print(f"[val   {step:6d}] " + " ".join(f"{k}={v[k]:.4f}" for k in v))
+                with metrics_path.open("a") as f:
+                    f.write(json.dumps({"kind": "val", "step": step,
+                                        **{f"val_{k}": vv for k, vv in v.items()}}) + "\n")
+                wlog(wandb_run, {f"val/{k}": vv for k, vv in v.items()}, step=step)
             if v["loss"] < best_val:
                 best_val = v["loss"]
                 p = run_dir / "best.pt"
