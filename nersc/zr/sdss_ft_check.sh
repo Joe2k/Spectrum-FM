@@ -1,0 +1,2 @@
+sleep 210
+ssh perlmutter 'echo "=== merge + first finetune ==="; grep -E "merged|=== \[3|\[ft\].*world|--- v3|--- v2|step .*sel_nmad|FINAL|Traceback|Error|OutOfMemory|nccl|NCCL" /pscratch/sd/j/joe2k/sdss_ft/run.log 2>/dev/null | tail -18' 2>&1 | grep -vE "NOTICE|Laboratory|property|expectation|intercepted|authorized|recording|Unauthorized|disciplinary|stated|consent|^\*|Login|^$|monitored|enforcement|By using|Any or all|conditions"
