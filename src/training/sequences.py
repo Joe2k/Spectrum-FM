@@ -90,27 +90,30 @@ def tokenize_and_build(
               * Z-task (prob `blind_z_frac`): encoder spectrum UNMASKED,
                 redshift -> REDMASK. Redshift is supervised (position 0);
                 the spectrum block is all -100 (nothing to reconstruct).
-                z is supervised from a full spectrum — matching
-                inference-time blind-z.
+                z is supervised ONLY in this mode, always from a full
+                spectrum — matching inference-time blind-z.
               * Recon+z-shown (prob `(1-blind_z_frac)*recon_z_shown_frac`):
                 encoder spectrum masked per `encoder_mask_ratio`, redshift
-                token SHOWN (true z). Spectrum supervised AND position-0
-                keeps the true z (the trivial-copy case: the encoder sees
-                the true z, so the loss is ~0, but the channel stays warm
-                and the encoder representation is co-trained under
-                "z shown + spectrum reconstruction" — the alignment
-                pressure that pure DECOUPLE lost in the 2026-06-29 A/B).
+                token SHOWN (true z). Spectrum supervised; position-0
+                redshift target -> -100 (no trivial z-copy gradient).
               * Recon+z-hidden (the remainder): encoder spectrum masked,
                 redshift -> REDMASK. Spectrum supervised; position-0 -> -100.
-            Net effect: z supervision rate is `blind_z_frac +
-            (1-blind_z_frac)*recon_z_shown_frac` (75% at the defaults),
-            with all the "real" z-prediction gradient still coming only
-            from the Z-task rows (full spectrum, z hidden). The user's
-            intent of "z gradient never comes from a half-masked spectrum
-            with z hidden" is preserved. Requires `mask_targets_only=True`
-            and `encoder_mask_ratio>0` for the recon modes to supervise
-            anything. Ignored for Approach B. Default False = legacy
-            independent masks.
+            Requires `mask_targets_only=True` and `encoder_mask_ratio>0` for
+            the recon modes to supervise anything. Ignored for Approach B.
+            Default False = legacy independent masks.
+
+            Note (2026-06-30): a "surgical alignment" variant that kept
+            the true z at position-0 on the recon+z-shown rows (restoring
+            the trivial-copy z-supervision) was implemented and tested in
+            run abmask_dec_v2_zv2 (W&B 42bj6sck). It did NOT recover V3/V4
+            parity: at step 4000 val_z/z_nmad 0.084, val_z/redshift_acc
+            0.0013, train/redshift_acc still essentially 0 — the same
+            trajectory as the pure DECOUPLE run (ot51pk0s). The trivial
+            z-copy loss is too close to 0 to materially change the
+            encoder's gradient; the Z-task rows still have no spectrum
+            gradient, so the encoder still builds mode-specialized
+            representations. See the 2026-06-30 RESEARCH_LOG entry for
+            the full negative result.
         blind_z_frac: fraction of samples that are the Z-task (full
             spectrum, predict z). Only used when `decouple_masks=True`.
         recon_z_shown_frac: within the recon samples, fraction that SHOW the
@@ -238,18 +241,10 @@ def tokenize_and_build(
         spec_target[~masked_positions] = -100
 
     if decouple_masks and is_recon is not None:
-        # Supervise z (position 0) on the Z-task rows (full spectrum, z
-        # hidden) AND on the recon+z-shown rows (the trivial-copy case:
-        # the encoder sees the true z, so the loss is ~0, but the channel
-        # stays warm and the encoder representation is co-trained under
-        # "z shown + spectrum reconstruction" — the alignment pressure
-        # the pure DECOUPLE objective lost in the 2026-06-29 A/B). Only
-        # the recon+z-hidden rows lose their z supervision, preserving
-        # the user's intent that "z gradient never comes from a
-        # half-masked spectrum with z hidden." Net supervision rate
-        # goes from 50% (DECOUPLE) -> 75% at the defaults.
-        z_hidden_recon = (is_recon & ~show_z).squeeze(1)
-        target[z_hidden_recon, 0] = -100
+        # Supervise z (position 0) ONLY in the Z-task rows (full spectrum).
+        # Recon rows — whether z was shown or hidden — get position-0 -> -100,
+        # so the redshift gradient never comes from a half-masked spectrum.
+        target[is_recon.squeeze(1), 0] = -100
 
     return encoder_input, decoder_input, target, masked_positions
 

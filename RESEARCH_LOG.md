@@ -4004,3 +4004,105 @@ R² = ~0.63–0.74 for BOTH. Slides 76–77 use the pooled definition to stay co
 V4 wins on every type's σ_NMAD with no regression — the headline of the new "Transformer V4" deck
 section. (Earlier I'd reported recon flux R² ≈0.645 — that was the median-per-sample metric from
 `decab_analyze.py`, not the deck's pooled metric; both show V3≈V4.)
+
+---
+
+## 2026-06-30: Z2 retry — surgical alignment fix to DECOUPLE also fails (do not adopt)
+
+**User direction.** Z2 pure DECOUPLE failed 2026-06-29 (run `ot51pk0s`,
+`val_z/z_nmad 0.044`, 90× worse than V4@200k's 0.00048). Tried Option A
+("surgical alignment" fix) per the 2026-06-29 plan: keep the trivial-copy
+z-supervision on the recon+z-shown rows (currently all recon rows have
+position-0 = -100, regardless of whether the encoder saw the true z). The
+hope: restoring the trivial z-copy on 25% of recon rows recreates the
+"V3/V4 alignment pressure" (every encoder representation co-trained for
+"z + spectrum" on the same forward pass) while preserving the user's
+stated intent of "z gradient never comes from a half-masked spectrum with
+z hidden."
+
+**Implementation (reverted, see below).** 2-line change in
+`src/training/sequences.py`: only `target[is_recon & ~show_z, 0] = -100`
+(the recon+z-hidden rows). The recon+z-shown rows keep the true z at
+position-0 — loss trivially ~0 (encoder sees the true z), but the channel
+stays warm and the encoder representation is trained under
+"z shown + spectrum reconstruction." Six new tests in
+`TestDecoupledMasks` (`tests/test_training_helpers.py`); all 6 passed
+locally and on NERSC. `nersc/ab_decouple.sh` gained a `decouple_v2` arm
+(`abmask_dec_v2_zv2`, port 29413).
+
+**Run (W&B `42bj6sck`, `abmask_dec_v2_zv2`).** From-scratch, 50k steps,
+z-v2 (gr=4.0), masked-targets-only, mask-ratio U[0.15, 0.75], soft-sigma
+24, weight 1.0, bf16, d768/6+6/12h, batch 32, lr 8e-4, seed 42.
+**Killed at step 4480/50000** when the trajectory was clearly going the
+same way as the failed DECOUPLE.
+
+| step | dec_v2 (this run) | dec_zv2 (failed 06-29) | v4@50k (target) |
+|---|---|---|---|
+| `val_z/z_nmad` 1k | 0.037 | n/a | ~0.004 |
+| `val_z/z_nmad` 4k | **0.084** | 0.082 (step 4.5k) | ~0.004 |
+| `val_z/z_outlier_frac_05` 4k | **0.533** | 0.524 (step 4.5k) | ~0.075 |
+| `val_z/redshift_acc` 4k | 0.0013 | 0.0025 | ~0.04 |
+| `val_z/redshift_acc_within2` 4k | 0.0063 | 0.0075 | ~0.18 |
+| `val_z/loss_redshift` 4k | 7.52 (still rising) | 7.56 (step 4.5k) | ~5.1 |
+
+**The new run is on the same trajectory as the failed DECOUPLE — z-loss
+is *rising* (6.85→7.52), `redshift_acc_within2` is flat at ~0.6%, and
+`val_z/z_nmad` is at 0.084 at step 4k vs the failed run's 0.082 at the
+same step. Killing early (step 4480, ~17 min in) saved ~1.5h of GPU
+that was going to land at `val_z/z_nmad ≈ 0.044` (the failed run's 50k
+endpoint, 90× worse than V4@200k's 0.00048).**
+
+**Corrected root-cause analysis.** The trivial-copy z-supervision I
+restored is too close to 0 to materially change the encoder's gradient
+— the encoder learns to ignore it. The structural problem isn't
+"trivial z-copy is missing," it's **"the encoder representation never
+sees a joint z+spectrum gradient on the same forward pass"**:
+- Z-task rows (50%): real z signal from full spectrum, no spectrum gradient.
+- recon+z-shown rows (25%): spectrum gradient, trivial z (loss ≈ 0).
+- recon+z-hidden rows (25%): spectrum gradient, no z gradient.
+
+V3/V4's independent masks produce a joint z+spectrum gradient on every
+forward pass (with the spectrum mask and z mask drawn independently),
+so the encoder's weights always see "this representation is good for z
+AND good for spectrum." DECOUPLE breaks that — the encoder can build
+mode-specialized representations (Z-task rows optimize for z, recon
+rows optimize for spectrum) and the shared weights settle into a
+different compromise. The trivial-copy z-loss I added is real
+"alignment" mathematically, but its gradient is small enough (loss ≈
+0 on a non-trivial softmax) that the encoder learns to ignore it. No
+row in DECOUPLE has both real z signal and real spectrum signal at
+once.
+
+**Decision: abandon DECOUPLE entirely. V4 is the strongest redshift
+model to date and the V3/V4 independent-mask recipe is the right one.**
+V4 (σ_NMAD 0.00048, QSO σ_NMAD 0.00323, QSO max z_pred 4.08 with the
+z-v2 ceiling fix) is the writeup headline. The DECOUPLE premise —
+"splitting the two tasks onto disjoint row populations fixes a
+train/test mismatch" — was a misdiagnosis. V4's independent masks
+handle the same "predict z from full spectrum at test" by *training on
+it* (z gradient comes from rows where z is hidden; the spectrum is full
+or masked; both are useful for the representation). The DECOUPLE design
+denies the encoder the only signal that made the V3/V4 alignment work:
+joint z+spectrum gradients on the same forward pass.
+
+**Reverted.** `src/training/sequences.py` and `nersc/ab_decouple.sh`
+restored to the 2026-06-29 state. The `TestDecoupledMasks` test
+additions were removed (they tested the now-reverted behavior). The
+docstring of `decouple_masks` now carries a `Note (2026-06-30)` block
+pointing at this entry, so future readers see both attempts and their
+outcomes without re-running. Run dir
+`$SCRATCH/deepsrch/checkpoints/abmask_dec_v2_zv2/` and W&B run
+`42bj6sck` are now historical artifacts of a second failed attempt;
+neither is referenced anywhere else.
+
+**Two NERSC ops notes (recorded for reuse).**
+1. `scancel <JOBID>` is the only reliable way to kill a single job
+   under `salloc` + `srun -n1 torchrun`; `pkill -f abdecv2` only works
+   on the login node, not the compute node.
+2. With untracked files blocking `git pull origin main` (NERSC local
+   has SDSS-fine-tune scripts that aren't in any commit yet), the fix
+   is to move them to `/tmp/nersc_untracked_backup/` first, pull, then
+   optionally restore. The untracked files are working artifacts
+   (build_sdss_lists.py, decab_analyze.py, plot_fewshot.py, etc.) and
+   `git status` will keep complaining about them until they're added
+   to a commit.
