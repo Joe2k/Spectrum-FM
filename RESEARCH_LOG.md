@@ -10,6 +10,15 @@ Living document of findings, decisions, and experimental results.
 **Remote:** `spectrum-fm` = `git@github.com:Joe2k/Spectrum-FM.git` (push branch `main`)
 **NERSC repo:** `$HOME/Spectrum-FM` = `/global/u1/j/joe2k/Spectrum-FM`
 **W&B:** entity `jjayaseelan-university-of-san-francisco`, project `redshifty`
+**NERSC compute account (as of 2026-06-29):** `m5374` — GPU jobs use `-A m5374_g`
+(replaces the old `deepsrch_g`). CFS project dir `/global/cfs/cdirs/m5374` (20 TB,
+joe2k in group `m5374`). All launchers/`.slurm` updated; the `$SCRATCH/deepsrch/...`
+*scratch folder name* is unrelated to the account and kept as-is.
+**Data-durability (scratch is purged):** recurring `scrontab` job (`cron` QOS, every
+6 h) runs `$SCRATCH/cfs_backup.sh` → mirrors `$SCRATCH/deepsrch/checkpoints` (+ `zr`,
+`manifests`, `sdss_ft`, `examples`, `zheadft`) to `/global/cfs/cdirs/m5374/joe2k/scratch/`
+(additive, no `--delete`, flock-guarded). One-time `cfs_migrate_run.sh` copied the old
+`/global/cfs/cdirs/deepsrch/joe2k/` → `/global/cfs/cdirs/m5374/joe2k/deepsrch_cfs_backup/`.
 
 **SSH access to NERSC (from mac):** auth = NERSC sshproxy short-lived cert (24h).
 - Client: `~/.local/bin/sshproxy` (v2.1.2, extracted from
@@ -44,10 +53,47 @@ Living document of findings, decisions, and experimental results.
 `spectrum_tokenizer_v1/`, `spectrum_tokenizer_v2/`, and three transformers:
 `approach_a_fm_v1_10k_a_ddp4_redmask50_v9/` (= **V1**, v1 tokens),
 `transformer_v2_512hard/` (= **V2**, 512-bin hard, v2 tokens, run cd1ikb99),
-`transformer_v3_4096soft/` (= **V3**, 4096-bin soft, v2 tokens, run aqxmwgl1).
-V2/V3 `best.pt` = run best-val stripped of optimizer (~400MB). Notebooks:
-`notebooks/07…` (V1), `notebooks/09_predictions_v2_512hard.ipynb`,
+`transformer_v3_4096soft/` (= **V3**, 4096-bin soft, v2 tokens, run aqxmwgl1),
+`transformer_v4_zv2/` (= **V4**, z-v2 high-z ceiling, gaussian_range 4.0, run dcynbaqt,
+best.pt @ step 198000 — **the default/primary transformer**, supersedes V3).
+V2/V3/V4 `best.pt` = run best-val stripped of optimizer (~413MB). `MANIFEST.json`
+`default_transformer=transformer_v4_zv2`, `default_tokenizer=spectrum_tokenizer_v2`;
+register via `scripts/setup_release_checkpoints.py` (V4 in ARTIFACT_MAP w/ `local_pt`).
+Parity PNGs: `plots/v4_parity_by_type.png`, `plots/v4_parity_qso_ceiling.png` (rendered
+by `scripts/render_v4_parity.py` from the `type_v4200_r0.npz` blind-z dump + `typemap.npz`).
+Notebooks: `notebooks/07…` (V1), `notebooks/09_predictions_v2_512hard.ipynb`,
 `notebooks/10_predictions_v3_4096soft.ipynb`.
+
+**Z1 — QSO z-ceiling fix (high-z z-tokenizer):** builder `nersc/build_z_v2.py` →
+`checkpoints/z_tokenizer_v2.pt` (z-v2 = `gaussian_range=4.0`, 4096 bins, reaches z≈4.4).
+Fine-tune (Stage A, pending) `nersc/finetune_zhead.py`; full fresh run (Stage B, gated)
+via `nersc/train_transformer.py` with z-v2 config. See 2026-06-28 entry.
+
+**Z2 — Decoupled-masking objective (separate spectrum & redshift tasks):** code in
+`src/training/sequences.py` (`tokenize_and_build(..., decouple_masks, blind_z_frac,
+recon_z_shown_frac)`) + `nersc/train_transformer.py` flags `--decouple-masks
+--blind-z-frac --recon-z-shown-frac --two-pass-val`. A/B launcher `nersc/ab_decouple.sh
+{ctrl|decouple}` → runs `abmask_{ctrl,dec}_zv2` (run dirs
+`$SCRATCH/deepsrch/checkpoints/abmask_{ctrl,dec}_zv2/`). See 2026-06-29 entry.
+**Recovered scratch harness (version-controlled):** `nersc/zr/` — all the as-run
+`$SCRATCH/zr/` + `/tmp` redshift eval/plot/SDSS scripts collected into the repo (see
+`nersc/zr/README.md`). Includes the slide-42/43 **joint parity+marginals** generator
+`nersc/zr/joint_val.py` (→ `plots/plot_joint_v4_val.png`, the V4 ceiling-fixed parity).
+**Deck joint-plot hosting:** the slide 42/43/78 parity images are served from the
+`gh-pages` branch of **`github.com/Joe2k/Spectrum-FM`** (separate from the code repo
+`cosmologyfoundation/redshifty`) at `https://joe2k.github.io/Spectrum-FM/val/plot_joint_<tag>_val.png`
+(`v2`,`v3`,`v4`). Pushed `plot_joint_v4_val.png` there (commit on gh-pages) and added a
+new deck slide (after slide 77) replicating slide 42 as "V3 left, V4 right".
+**Per-type eval harness (Z1/Z2 results):** `$SCRATCH/zr/zr_type_eval.py` (one pass →
+blind-z [full spectrum] + z-hidden 50%-masked recon, reads spectype per shard),
+aggregated by `nersc/decab_analyze.py` (adds gross-η + QSO z-ceiling check). Launchers
+`nersc/run_decab_eval.sh` (3 ckpts on one node) + `nersc/run_v450_eval.sh` (one ckpt
+4-way sharded). Report: `$SCRATCH/zr/decab_report.txt`; npz `$SCRATCH/zr/type_{dec50,
+v450,v4200}_r*.npz`; typemap `$SCRATCH/zr/typemap.npz`. NOTE: periodic `step_NNNNN.pt`
+checkpoints are **model-only (no embedded `z_tokenizer`)** — graft it from the run's
+`last.pt` (fixed at init for the whole run) → `step_00050000_zt.pt`. **V4 (z-v2, indep.
+masks) run dir = `$SCRATCH/deepsrch/checkpoints/approach_a_v2cache_x2x3_zv2_ddp4/`**
+(`last.pt`=step 200000; `step_00050000.pt`=fair 50k A/B point). See 2026-06-29 entry.
 
 **SDSS OOD data (NERSC CFS):** `/global/cfs/cdirs/sdss/data/sdss/dr{7..17}/` — spec-lite
 coadds at `.../spectro/redux/<RUN2D>/spectra/lite/<PLATE>/spec-<PLATE>-<MJD>-<FIBER>.fits`
@@ -58,6 +104,16 @@ coadds at `.../spectro/redux/<RUN2D>/spectra/lite/<PLATE>/spec-<PLATE>-<MJD>-<FI
 **Runs:**
 - 4096-soft = THE model: run `approach_a_v2cache_x2x3_ddp4`, W&B `aqxmwgl1` (finished 200k)
 - 512-hard control: run `approach_a_v2cache_x2_512hard_ctrl_ddp4`, W&B `cd1ikb99`
+
+**SDSS few-shot fine-tuning (X-FT):** scripts in-repo under `nersc/` —
+`build_sdss_lists.py` (plate-disjoint train/test path lists), `pretok_sdss.py`
+(4-GPU-sharded wavelength-aware tokenization → npz), `sdss_finetune.py` (standalone
+DDP fine-tune + dual eval: blind redshift + masked recon), `plot_fewshot.py`
+(per-stage parity+error-hist + learning curves), `run_sdss_ft.sh` (orchestration).
+Work dir on NERSC: `$SCRATCH/sdss_ft/` — `train_paths.txt`, `test_paths.txt`,
+`sdss_train.npz` (≤5000), `sdss_test.npz` (≤25000), and `out/` holding
+`metrics_{tag}_{shots}.json`, `zr_{tag}_{shots}.npz`, `best_{tag}_{shots}.pt`,
+`plot_fewshot_{tag}_{shots}.png`, `curve_redshift.png`, `curve_recon.png`.
 
 ---
 
@@ -3309,3 +3365,642 @@ local GPU / DESI-FITS / SDSS-stream env): **Run-All locally to generate the comp
 plots.** Note the prior X9 finding — OOD redshift collapses to the DESI prior and
 fully-blind OOD reconstruction degrades — so expect the OOD panels to look much worse
 than DESI for all three.
+
+---
+
+## 2026-06-20: Fix DESI-panel x-axis in V2/V3 notebooks — wavelength, not grid index
+
+User flagged that the in-distribution DESI spectra "drop a lot in the last sector"
+and that the x-axis had no wavelength. Diagnosis: **not a model bug.** Tokenizer v2
+resamples every spectrum onto the fixed AION grid **3500–10462.4 Å** (8704 px @ 0.8 Å),
+but DESI only covers **3600–9824 Å**; `SpectrumTokenizer.resample_to_grid` zero-fills
+the grid outside coverage (`in_cov` mask, `src/tokenizers/spectrum.py:441`). So the flat
+blue tail (3500–3600 Å, ~125 px) and the **red tail (9824–10462 Å, ~800 px = "the last
+sector")** are genuinely empty, not failed reconstruction. The DESI plots labeled the
+x-axis `latent-grid position` (0–8703), hiding this; and `_w2x` placed the emission/
+absorption line markers as if the axis ran 3600→9824 (wrong slope *and* offset → lines
+mis-located).
+
+**Fix (notebooks 09 & 10).** Added `wave_axis(n)`/`shade_uncovered(ax)` helpers
+(import `GRID_WAVE_MIN/STEP/MAX`); all four DESI plot cells (teacher-forced, AR,
+blind-50%, blind-90%) now plot flux/residual/noise against observed wavelength (Å),
+grey-shade the out-of-DESI-coverage band, and mark lines with the correct identity
+mapping over the full 3500–10462.4 Å grid. SDSS/OOD cells already used real wavelength
+(`sdss_wave`) — unchanged. Both notebooks still pass `nbformat.validate`; Run-All locally
+to regenerate. The red-tail drop should now read clearly as "outside DESI coverage."
+
+**SDSS-OOD panels (same family of bug).** The OOD cells decoded flux on the model
+grid (3500–10462.4 Å) but plotted it against `ref_wave = linspace(3600, 9824, 8704)`
+— squeezing the curve and pushing the zero-filled red tail (9824–10462 Å) to the right
+edge as a "drop." Also the grey coverage bands were `axvspan(3600,3567)`/`axvspan(10356,
+9824)` (empty/reversed) so nothing was shaded, and cell-38 line markers used a stale `z`
+from the DESI loop. Fixed: `ref_wave = wave_axis(...)`; `shade_uncovered()` (the binding
+coverage is **DESI's 3600–9824 Å — SDSS is clipped to it by `resample_sdss` before the
+model sees it**, so SDSS's native 3567–10356 Å red end above 9824 is discarded); honest
+edge lines at the DESI bounds; per-sample `ood_specs[i]['z']` for markers; and `_outside`
+now clips the true-flux cleanup to SDSS∩DESI. SDSS native grid (BOSS log-λ) ≈ 3567–10356 Å,
+4630 px; printed per-spectrum in the load cell.
+
+**Clip all spectrum graphs to the DESI range + exact-wavelength ticks (per user).**
+Added `WAVE_TICKS = [3600,4000,…,9000,9824]` and `style_wave_axes(fig)` to the helper
+cell; called before every `plt.show()` in the 6 spectrum-reconstruction cells (4 DESI +
+2 SDSS-OOD). Every axis is now `set_xlim(3600, 9824)` (DESI native coverage) with explicit
+wavelength tick labels on the bottom axis. The zero-filled v2-grid tails (3500–3600,
+9824–10462 Å) and the `shade_uncovered` bands now fall outside the view → the "drop in the
+last sector" is gone. For SDSS the same DESI window is shown (SDSS fully covers it, so no
+grey appears inside the frame). Redshift/MSE/token-accuracy panels unchanged (non-wavelength
+x-axes). Both notebooks pass `nbformat.validate`; Run-All locally to regenerate.
+
+---
+
+## 2026-06-24: Per-object-type evaluation (BGS / LRG / ELG / QSO), V2 & V3
+
+**Setup.** Ran a self-contained per-type eval on NERSC (interactive 4-GPU node,
+DDP-style strided sharding) over the **DR1 held-out val split** (healpix holdout
+0.05, seed 42). For every spectrum we measure two tasks with the same masking the
+notebooks use: (a) **blind redshift** — full spectrum shown, redshift hidden via
+REDMASK, single `[SOS]` decode (`encoder_mask_ratio=0.0, redshift_mask_ratio=1.0`);
+(b) **masked spectrum reconstruction** — 50% of encoder spectrum tokens hidden, flux
+decoded from the predicted codes (`encoder_mask_ratio=0.5`). Object types come from
+the redrock FIBERMAP `DESI_TARGET`/`BGS_TARGET` bits (QSO=1<<2, LRG=1<<0, ELG=1<<1,
+BGS_ANY=1<<60), built into a `targetid → class` map over the 1,520 val healpix
+(typemap: BGS 320,854 · ELG 267,340 · LRG 172,305 · QSO 122,287 · OTHER 411,256).
+Good rows only (`zwarn==0 & nonzero_flux`). N per class after the good-row cut:
+BGS 313,075 · LRG 168,372 · ELG 210,961 · QSO 106,848.
+
+**Results** (z metrics: σ_NMAD lower=better, R²; recon: masked-token acc, flux RMS,
+flux R² — all medians over masked pixels):
+
+| model | type | N | z σ_NMAD | z R² | mask-acc | flux RMS | flux R² |
+|---|---|---|---|---|---|---|---|
+| **V3** (4096-soft) | BGS | 313,075 | 0.00064 | 0.801 | 0.195 | 0.552 | 0.726 |
+| **V3** | LRG | 168,372 | 0.00107 | 0.942 | 0.176 | 0.211 | 0.626 |
+| **V3** | ELG | 210,961 | 0.00326 | 0.753 | 0.168 | 0.228 | −0.473 |
+| **V3** | QSO | 106,848 | 0.00476 | 0.764 | 0.198 | 0.232 | 0.627 |
+| **V2** (512-hard) | BGS | 313,075 | 0.00067 | 0.789 | 0.192 | 0.544 | 0.735 |
+| **V2** | LRG | 168,372 | 0.00132 | 0.933 | 0.175 | 0.206 | 0.640 |
+| **V2** | ELG | 210,961 | 0.00607 | 0.717 | 0.168 | 0.222 | −0.402 |
+| **V2** | QSO | 106,848 | 0.01272 | 0.530 | 0.197 | 0.229 | 0.636 |
+
+**Findings.**
+- **V3 > V2 most on the hard types.** Redshift σ_NMAD on QSO is 0.0048 (V3) vs
+  0.0127 (V2) — a 2.7× improvement; ELG ~2× better (0.0033 vs 0.0061). On easy
+  bright BGS the two are tied (~6.5e-4). The 4096-bin soft-label head buys robustness
+  on broad-line / high-z objects exactly where the hard-label head produces
+  catastrophic outliers (QSO z R² 0.76 vs 0.53).
+- **Type ordering for redshift:** BGS (best) → LRG → ELG → QSO, tracking brightness
+  and line strength. z R² is highest for LRG (0.94 — tight, well-separated redshifts).
+- **Reconstruction:** masked-token accuracy is ~17–20% across all types (1-of-1024
+  code match understates fidelity). The physical metric is flux RMS/R²: BGS
+  reconstructs best (R²≈0.73). **ELG flux R² is negative** for both models —
+  ELGs are faint, near-continuum-free emission-line galaxies, so under 50% masking
+  the hidden spans carry little predictable structure and variance-normalized R²
+  goes negative despite an absolute RMS (~0.23) in line with the other types. RMS is
+  only comparable *within* a type (BGS's high RMS 0.55 with high R² 0.73 is the large
+  flux amplitude, not worse error); across types use R².
+
+**2026-06-26 follow-up — pooled flux R² resolves the negative ELG.** The negative ELG
+flux R² is an artifact of *median-of-per-spectrum-ratios*: each ELG gets an equal vote, so
+the metric is dominated by the typical faint, noise-only masked span where a flat-mean
+baseline is unbeatable. Recomputing as **pooled R² = 1 − Σss_res/Σss_tot** per type
+(variance-weighted; `ss_res_i ∝ flux_rms_i²`, `ss_tot_i = ss_res_i/(1−flux_r2_i)`, with the
+Bernoulli-masking `n_px` factor cancelling since it's spectrum-independent) flips ELG from
+**−0.402→+0.473 (V2)** and **−0.473→+0.448 (V3)**, and lifts the others to ~0.97–0.99 (the
+bright high-variance spectra dominate the pooled sums). ELG stays the worst-reconstructed
+type but is no longer "worse than the mean." **Pooled is the fairer cross-type number.**
+Method `/pscratch/sd/j/joe2k/zr/zr_type_pooled.py` (+ full-table renderer
+`zr_type_table_full.py` → `plot_by_type_pooled.png`); slide `slide_bytype_v2v3` updated
+in-place — existing "flux R²" header renamed "flux R² (med)" and a new **"flux R² (pooled)"**
+column added to both the V2 and V3 native tables. *(2026-06-26 later: the "(med)" column was
+dropped at the user's request — the slide now shows a single pooled **flux R²** column, with
+its definition `R²=1−Σ_j(y_j−ŷ_j)²/Σ_j(y_j−ȳ)²` added as a margin note.)*
+
+**2026-06-26 — per-type >5σ outlier fractions (slide 41).** Added an **η(>5σ)** column to the
+per-object-type tables: fraction with `|Δz/(1+z)| > 5·σ_NMAD` (each type vs its **own**
+σ_NMAD core scatter), computed offline from the existing per-type arrays
+(`/pscratch/sd/j/joe2k/zr/type_{v2,v3}_r*.npz`, `zr_type_outliers.py`). Values —
+V3: BGS 5.3% · LRG 4.6% · ELG 19.0% · QSO 28.1%;  V2: BGS 2.9% · LRG 11.0% · ELG 13.5% ·
+QSO 35.2%. The cores are extremely tight (σ_NMAD~6e-4) but the catastrophic tails are heavy
+and type-dependent: V3's soft-label head roughly halves the QSO/LRG outlier rate vs V2
+(QSO 28% vs 35%, LRG 4.6% vs 11%) at the cost of slightly more BGS/ELG tail.
+
+## 2026-06-26: DESI **train-split** blind-redshift parity plots (full 18.58M, V2 & V3)
+
+Ran blind-z over the **95% healpix train split** (the complement of the val holdout) for both
+models — the in-distribution counterpart to the val parity plot. **N = 18,582,604** each.
+**Train σ_NMAD = 0.000893 (V3) / 0.000997 (V2)**, η>0.0033 = 17.7% / 26.0% — essentially
+identical to val (0.00090 / 0.00100), confirming no train/val generalization gap and the same
+z≈2 band-limited ceiling. Added a `--train-split` flag to `/pscratch/sd/j/joe2k/zr/zr_eval.py`
+(uses the train side of `split_records_by_healpix(holdout_frac=0.05, seed=42)`).
+
+**NERSC GPU-binding (re-confirmed, important).** Launching 4 shards in a bare `salloc` shell
+with `CUDA_VISIBLE_DEVICES=0..3` FAILED — only device 0 was visible, so shards 1–3 fell back
+to **CPU** (caught at startup, cancelled, no wasted hours). Fix that worked and **tripled
+throughput** (550→1755 spectra/s/shard): `srun -n4 -N1 --gpus-per-task=1 --cpus-per-task=16`
+with the script reading `SLURM_PROCID` as shard-id (Slurm cgroup-isolates each task to a
+distinct GPU; each sees `CUDA_VISIBLE_DEVICES=0` = its own physical GPU). ~45 min/model,
+sequential V3→V2, `-t 240`.
+
+**Artifacts.** Runner `~/run_train_wrap.sh` + `/pscratch/sd/j/joe2k/zr/{run_train4.sh,
+zr_train_shard.sh}`; shards `zr_{v2,v3}_train.r{0..3}.npz` → merged
+`/pscratch/sd/j/joe2k/zr/zr_{v2,v3}_train.npz` (z_pred, z_true). Mac renderer
+`/tmp/joint_train.py` → `plot_joint_{v2,v3}_train.png` (20×20, parity colored by Δz/(1+z) +
+true-z top / predicted-z right count marginals). Published
+`https://joe2k.github.io/Spectrum-FM/plot_joint_{v2,v3}_train.png`; deck slide
+`slide_train_joint` (both side-by-side) inserted right after `slide_val_joint`.
+
+**AION input masking for evaluation (for the writeup).** AION's *pretraining* uses
+4M-style two-disjoint-subset masking (input budget 256 / output budget 128 random
+tokens). The **Table 1 evaluation numbers use NO masking** — frozen encoder +
+attentive pooling + a 2-layer MLP probe on the *full* input. So AION's redshift
+R²=1.00 (with spectra) is a linear-probe-on-full-input number, not a masked-prediction
+number; our per-type numbers are the harder generative/blind setting.
+
+**Artifacts.** NERSC eval scripts under `$SCRATCH/zr/` (`zr_type_eval.py`,
+`build_typemap.py`, `zr_type_analyze.py`, `run_all_type.sh`); table figure
+`$SCRATCH/zr/plot_by_type.png` (also pulled to mac `/tmp/zr_plots/`). Added to the
+"Updates" Google Slides deck as one slide with two stacked tables (V3 top, V2 bottom).
+
+---
+
+## 2026-06-25: SDSS few-shot fine-tuning — scripts added (run pending)
+
+**Goal.** Test whether a few thousand SDSS spectra of supervision close the OOD gap
+(zero-shot blind-redshift σ_NMAD ≈ 0.084 V3 / 0.214 V2 on a mixed ~23k SDSS sample,
+η>90%). Few-shot **learning curve** over shots = {0, 500, 1000, 2000, 5000, 10000, 20000}
+(extended high end to see saturation — legacy RUN2D 26 has ~1.6M spectra), both V2 & V3,
+on **legacy low-z SDSS** (DR17 `sdss/`, RUN2D **26**, isolates instrument/domain shift from
+the model's z≈2 ceiling). Held-out **test = 25,000** plate-disjoint spectra. **Full-model
+fine-tune, low LR.** Plan file: `~/.claude/plans/temporal-waddling-dragonfly.md`.
+
+**Design (added 5 scripts under `nersc/`, see canonical paths above).**
+- **Plate-disjoint split** (`build_sdss_lists.py`): train/test never share a PLATE — the
+  SDSS analogue of the DESI healpix split, no near-duplicate leakage.
+- **Tokenize once** (`pretok_sdss.py`): both transformers share the frozen v2 tokenizer, so
+  SDSS spectrum tokenization is model-independent — 4-GPU-sharded wavelength-aware encode →
+  `sdss_train.npz` / `sdss_test.npz` (`spec_indices`, `z`, `denorm`).
+- **Standalone DDP fine-tune** (`sdss_finetune.py`): loads the checkpoint, **restores the
+  bundled DESI z-tokenizer (NOT refit** — refitting would remap bins and break the redshift
+  head), V3 keeps its soft-label sigma. Fresh AdamW @ 2e-5, joint objective
+  (`encoder_mask_ratio=0.15`, `redshift_mask_ratio=1.0`, `redshift_weight=3`). Checkpoint
+  selected by best held-out σ_NMAD (subset); FINAL full-test eval is DDP-sharded over both
+  tasks — **blind redshift** (spectrum shown, z masked) and **masked recon** (50% spec + z
+  masked). `--shots 0` = eval-only zero-shot baseline.
+- **Plots** (`plot_fewshot.py`): 10 per-stage parity + attached error-hist plots (reuse the
+  `png_marg` layout) + two-task learning curves (σ_NMAD/η, flux R²/RMS).
+
+**Cleaning (same standard as DESI).** SDSS uses `require_good_zwarn=True` →
+`ZWARNING == 0` (SDSS SPECOBJ/SPALL pipeline flag, the analogue of redrock `ZWARN`) plus
+`require_nonzero_flux=True` — identical to the DESI cache filter. ~6% of files dropped
+(smoke: 640 → ~600 good). Both fine-tune and test sets use only pipeline-confident z.
+
+**Legacy SDSS layout (confirmed on CFS).**
+`/global/cfs/cdirs/sdss/data/sdss/dr17/sdss/spectro/redux/<RUN2D>/spectra/lite/<PLATE>/spec-<PLATE>-<MJD>-<FIBER>.fits`.
+RUN2D dirs: **26** (2,467 plates, ~640–1,280 spectra each ≈ 1.6M — legacy SDSS-I/II, used
+here), 103 (22), 104 (211); `v5_13_2` = BOSS/eBOSS (higher z, excluded). Each plate dir also
+holds a `.sha1sum` (excluded by the `spec-*.fits` glob).
+
+**NERSC 4-GPU interactive gotcha (operational, important).** Under
+`salloc -N1 --gpus 4`, the **bare login/`bash -lc` step sees only 1 GPU**
+(`torch.cuda.device_count()==1`), so `CUDA_VISIBLE_DEVICES=$i` overrides silently fall back
+to CPU / collide on GPU0. Fix: **run the whole script under a plain `srun -n1`** (NO
+`--gpus` flag — adding `--gpus 4` to the inner srun regresses it back to 1 visible GPU);
+the `srun` step inherits all 4 allocation GPUs (`CVD=0,1,2,3`, `device_count==4`). In
+`pretok_sdss.py` each shard pins its device via `--gpu-id i` + `torch.cuda.set_device(i)`
+(all 4 visible) rather than `CUDA_VISIBLE_DEVICES`. Launch pattern that works:
+`salloc … bash -lc "module load pytorch/2.8.0; srun -n1 bash -lc 'bash nersc/run_sdss_ft.sh'"`.
+Also set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` and free the optimizer +
+`empty_cache()` before the recon eval (the flux-decode pass OOM'd otherwise).
+
+**Smoke result (indicative, NOT final).** 64-shot V3 on legacy SDSS already reached
+σ_NMAD ≈ 0.0020 on a 200-spectrum test (vs 0.084 zero-shot on the old *mixed* SDSS sample) —
+legacy low-z is a much easier redshift regime (in the DESI CDF support), so the curve may
+saturate early. Recon eval worked end-to-end (flux R² ≈ 0.99 on the smoke test).
+
+**Results (2026-06-26, complete).** Ran on a 4-GPU interactive node (job 55062964) after the
+GPU-binding fix. Train cache 36,694 good → capped 20,000; test cache 25,000 (from 46,208
+good), plate-disjoint. Held-out test = 25,000. (First run `v3_0` threw an `ncclInvalidUsage`
+on ranks 1–3 during teardown *after* rank-0 wrote its result — non-fatal, result intact.)
+
+| model | shots | z σ_NMAD | η>0.0033 | recon flux R² |
+|---|---|---|---|---|
+| V3 | 0 (zero-shot) | 0.00174 | 31.5% | 0.983 |
+| V3 | 500 | 0.00050 | 7.6% | 0.984 |
+| V3 | 1000 | 0.00040 | 5.8% | 0.983 |
+| V3 | 2000 | 0.00038 | 5.3% | 0.984 |
+| V3 | 5000 | 0.00034 | 4.4% | 0.986 |
+| V3 | 10000 | 0.00032 | 3.9% | 0.986 |
+| V3 | 20000 | **0.00030** | **3.5%** | 0.987 |
+| V2 | 0 (zero-shot) | 0.00143 | 34.8% | 0.981 |
+| V2 | 500 | 0.00050 | 7.1% | 0.986 |
+| V2 | 1000 | 0.00049 | 6.7% | 0.984 |
+| V2 | 2000 | 0.00048 | 6.5% | 0.984 |
+| V2 | 5000 | 0.00048 | 6.7% | 0.985 |
+| V2 | 10000 | 0.00048 | 6.5% | 0.987 |
+| V2 | 20000 | 0.00046 | 6.3% | 0.986 |
+
+**Takeaways.**
+- **Few-shot works dramatically.** The 0→500 step is the big one: σ_NMAD ~0.0015 → 0.0005
+  and catastrophic η ~32% → ~7% for BOTH models. So a few hundred SDSS spectra mostly close
+  the OOD gap.
+- **V3's soft-label head keeps improving with more data; V2 (hard) plateaus.** Past 500
+  shots V2 flattens at ~0.00048 / 6.5%, while V3 continues 0.00050 → **0.00030 / 3.5%** at
+  20k. The 4096-bin soft head has the capacity to exploit additional SDSS supervision; the
+  512-bin hard head saturates. This mirrors the in-distribution V3>V2 story.
+- **Zero-shot on *legacy low-z* SDSS is already strong** (σ_NMAD 0.0014–0.0017), NOT the
+  0.084/0.214 we saw on the old *mixed* sample — that earlier OOD number was dominated by
+  high-z BOSS/eBOSS QSOs hitting the model's z≈2 ceiling, not by domain shift per se.
+- **Reconstruction was already near-ceiling** OOD (flux R² ≈ 0.98) and only nudges to 0.987;
+  fine-tuning's value here is almost entirely in *redshift*, not spectral reconstruction.
+- The **z≈2 ceiling persists** after fine-tuning (legacy SDSS is low-z, so no z>2 training
+  signal is added) — visible as the predicted-z plateau for true z≳2 in the parity plots,
+  but those objects are rare in legacy SDSS so η stays low.
+
+**Artifacts.** `$SCRATCH/sdss_ft/out/` on NERSC and mac `/tmp/zr_plots/sdss/`:
+`metrics_{tag}_{shots}.json`, `zr_{tag}_{shots}.npz`, 14 `plot_fewshot_{tag}_{shots}.png`
+(parity + error-hist), `curve_redshift.png`, `curve_recon.png`.
+
+---
+
+## 2026-06-26: Failure-mode example spectra — 4 prediction categories × 2 sets × V2/V3
+
+**Goal.** Pull 10 real example spectra (raw observed flux + targetid) for each of four
+blind-z prediction regimes, on BOTH the DESI DR1 val split and SDSS (zero-shot, 25k
+plate-disjoint test), for V2 and V3 — to *see* what the model is doing in each failure
+mode. 16 montage figures (2 sets × 2 models × 4 categories), 10 spectra each = 160 spectra.
+
+**Categories (per model, by blind z_pred vs z_true):**
+1. `cat1_predz0` — `|z_pred| < 0.02` (stars / z≈0).
+2. `cat2_overpred` — `z_pred < 0.5` and `z_pred − z_true > 0.15` (predicted ≫ true).
+3. `cat3_underpred` — `0.5 < z_true < 1` and `z_true − z_pred > 0.15` (true ≫ predicted).
+4. `cat4_ceiling` — `z_pred ≥ q99.9−0.12` and `z_true > z_pred + 0.3` (pred pinned at the
+   ≈2 ceiling, true higher). Confirms the z≈2 ceiling: DESI cat4 examples are z_true 2.6–3.5
+   QSOs (strong Lyα) all predicted at z≈2.06; V2's ceiling sits lower (~1.65) than V3's (~2.07).
+
+**Method.** `nersc/select_examples.py` — blind-z (`encoder_mask_ratio=0`, `redshift_mask_ratio=1`,
+single-[SOS], expected-value decode) over each set for both checkpoints, keeping identity:
+DESI via `DR1CachedTokenDataset` (targetid + survey/program/healpix → raw coadd `stitch_bands`);
+SDSS via per-file `read_sdss_spec_fits` (path = plate-mjd-fiberid). Category selection is global
+on the full prediction arrays; raw FITS flux read only for the picked rows. **DESI val ran 4-GPU
+sharded** (`srun -n1 torchrun --nproc_per_node=4`, each rank a stride of the 965,897 rows →
+~324 s/model/GPU vs ~1571 s single-GPU); SDSS scanned 15k test files single-GPU. Availability of
+each category (val, V3): cat1 165,651 · cat2 4,786 · cat3 4,799 · cat4 14,826 — all ≥10.
+
+**NERSC GPU-binding gotcha (re-confirmed + fixed).** Under `salloc --gpus 4`, the bare shell and
+`srun -n1 bash …` both see `device_count==1` (all workers collide on cuda:0 → OOM). A fresh
+`srun -n1 python …` step sees 4. Fix that works: `srun -n1 … torchrun --nproc_per_node=4`, with the
+script reading `LOCAL_RANK/RANK/WORLD_SIZE` and `set_device(LOCAL_RANK)`. All NERSC allocations now
+use `-t 240` (4 h) so a long pass never times out mid-run (results save only at the end).
+
+**Artifacts.** `nersc/select_examples.py` (new). NERSC `$SCRATCH/examples/sel_{val,sdss}.npz`
+(80 spectra each: model, cat, targetid, z_true, z_pred, flux, wave). Mac `/tmp/zr_plots/examples/`
++ renderer `/tmp/render_montages.py` → 16 `{val,sdss}_{v2,v3}_{cat}.png` (2×5 montages, each panel
+labeled targetid / z_true / z_pred). Published `https://joe2k.github.io/Spectrum-FM/examples/` and
+added to the "Updates" deck as 16 slides (val ×8, SDSS ×8).
+
+---
+
+## 2026-06-26: Failure-mode example spectra — SDSS **5000-shot fine-tuned** (typed)
+
+Repeated the 4-region example extraction on the **SDSS 5000-shot fine-tuned** checkpoints
+(`$SCRATCH/sdss_ft/out/best_{v2,v3}_5000.pt`, z-tokenizer bundled & frozen) over the same
+plate-disjoint test set, blind-z, single-GPU (`-t 240`). Scanned 26k FITS (kept 23,734 good),
+both models ~50 s. Region availability (V3): cat1 7,115 · cat2 34 · cat3 18 · cat4 212 —
+all ≥10; picked 10 each → 80 spectra (`$SCRATCH/examples/sel_sdss_5000.npz`).
+
+**Object types make the regions self-explanatory** (CLASS from each file's `SPECOBJ`/`SPALL`,
+via `~/add_types.py` → `sel_sdss_5000_typed.npz`):
+- **Predicted z≈0**: 10/10 **STAR** (both V2 & V3) — model correctly maps stars to z≈0.
+- **Predicted ≫ true (z_pred<0.5)**: mostly STAR/GALAXY (V2 8 STAR/2 GAL; V3 7 GAL/3 STAR).
+- **True ≫ predicted (0.5<z_t<1)**: QSO+GALAXY mix (V2 5/5; V3 3 QSO/7 GAL).
+- **Ceiling (≈2) ≪ true**: 10/10 **QSO** (both) — high-z quasars still pinned at the band-limited
+  ceiling (V2 1.655, V3 2.07) even after fine-tuning; the z≈2 ceiling is unchanged by SDSS supervision.
+
+**Artifacts.** Renderer `/tmp/render_montages_5000.sh` (object type + per-panel number badge #1–10 +
+10-px boxcar flux smoothing). 8 montages `/tmp/zr_plots/examples/sdss5000_{v2,v3}_{cat}.png` →
+`https://joe2k.github.io/Spectrum-FM/examples/` → deck +8 slides (objectIds `exs5k{v2,v3}c{1..4}`).
+Type-lookup helper `~/add_types.py` (NERSC). Selection reused `nersc/select_examples.py` unchanged.
+
+---
+
+## 2026-06-28: Z1 — lift the QSO z≈2 ceiling (z-tokenizer root cause + z-v2 build)
+
+**Plan:** `~/.claude/plans/temporal-waddling-dragonfly.md` (chosen direction #1, fully
+spectrum-blind: no class token). Goal — lift the QSO z>2 prediction ceiling and cut
+QSO/ELG catastrophic outliers via the redshift head + z-prior, without touching the
+(solved) encoder/reconstruction.
+
+**Root cause — CONFIRMED in code + numbers (the ceiling is the z-tokenizer prior, NOT
+the band).** `RedshiftTokenizer` (`src/tokenizers/redshift.py`) is CDF→Gaussian→FSQ over
+`[-gaussian_range, +gaussian_range]`, default **3.0**. In `decode()` the top FSQ level
+clamps the Gaussian to +3 → CDF Φ(3)=0.99865 → `_inverse_cdf` returns the **99.865th
+percentile of the fitted z sample**; anything rarer is unemittable. Loading the bundled
+tokenizers (`_restore_z_tokenizer`):
+
+| model | n_levels | gaussian_range | **max decodable z** | bins ≥ z2 | fit-sample z range |
+|---|---|---|---|---|---|
+| V3 4096-soft | 4096 | 3.0 | **2.130** | 36 / 4096 | [−0.004, **5.995**] |
+| V2 512-hard | 512 | 3.0 | **1.655** | **0 / 4096** | [−0.004, **4.521**] |
+
+These match the observed ceilings (V3 ~2.07, V2 ~1.65) almost exactly, and the
+bin-count dependence (V2<V3) proves it's prior/resolution, not the telescope. Crucially
+**the fit sample already contains z up to ~6** — the high-z QSOs are in training data;
+the tokenizer just discards the head's ability to represent them. (Galaxies *are*
+genuinely band-limited ~z1.6 once [OII]/4000Å-break leave; that part is real physics and
+stays out of scope — the lift is QSO-specific.)
+
+**Design choice — z-v2 = `gaussian_range=4.0`, same 4096 bins, same CDF fit (no
+reshaping).** Reaches **max z 4.40** (covers 99.994% of DESI objects), **539 bins ≥ z2 /
+287 ≥ z3**, while the low-z bin width only grows 0.00027→0.00035 at z≈0.2 — negligible vs
+the sub-bin expected-value decode at σ_NMAD ~3.5e-4 (lowest risk for the BGS/LRG
+regression guard). Widening `gr` further or reshaping the fit (oversampling z>1.8 ×10/×30
+→ ~950/1180 bins ≥z2, reach z~6) was rejected: it dilutes low-z resolution for only
+0.006% more objects above z4.4. The high-z **gradient** problem (starved tail) is handled
+separately by data oversampling in the Stage-A fine-tune, which does not touch bin
+boundaries.
+
+**z-v2 built + verified** (`nersc/build_z_v2.py` → `checkpoints/z_tokenizer_v2.pt`). It is
+a parameter-free remap (the z bins are vocab slots in the shared `lm_head`, not a separate
+head; bin count unchanged ⇒ **zero architecture change**, only the z-bin output/embedding
+weights are re-fit by the fine-tune). High-z round-trips now survive instead of clamping:
+z=2.5→2.499, z=3.0→2.998, z=3.5→3.493 (vs old hard ceiling 2.13).
+
+**Next (blocked on NERSC cert renewal):** Step 0(b) outlier decomposition from
+`/pscratch/sd/j/joe2k/zr/type_{v2,v3}_r*.npz` (ceiling-limited vs line-alias vs genuine),
+then Stage-A fine-tune `nersc/finetune_zhead.py` (load `best.pt`, swap z-v2, oversample
+z>1.8/QSO, DDP-4) — validate the ceiling lift + outlier drop cheaply before committing to
+the Stage-B full fresh run (V4).
+
+### 2026-06-28 (cont.): Z1 Step 0(b) — outlier decomposition validates the ceiling fix
+
+`nersc/decompose_outliers.py` on the DR1-val per-type arrays (`type_{v2,v3}_r*.npz`).
+Split the **gross** catastrophic outliers (|Δz/(1+z)| > 0.05) into ceiling-limited /
+big-line-swap (far-from-unity rest-line ratio) / genuine. (η>0.0033 is *below* QSO/ELG
+core σ_NMAD, so it mostly measures core width — use the gross threshold for the honest
+catastrophic read.)
+
+| type | gross outliers | **z_true > old ceiling** | big line-swap | genuine |
+|---|---|---|---|---|
+| V3 QSO | 25,138 | **74.1%** (59% pinned at ceiling) | 17.4% | 23.6% |
+| V2 QSO | 39,674 | **87.5%** | 7.4% | 10.0% |
+| V3 ELG | 26,855 | 6.2% | **43.8%** | 53.2% |
+| V2 ELG | 24,633 | 12.8% | **41.0%** | 49.5% |
+
+**Conclusion — sharpens the plan.** (1) **QSO gross catastrophic outliers are 60–88% the
+z-tokenizer ceiling** → z-v2 (reach z4.4) directly fixes the majority; expect QSO gross-η
+to more than halve. Residual ~17% is `[OII]↔CaK/4000Å` line-swaps (oversampling +
+dominant-mode decode territory). (2) **ELG is NOT a ceiling problem** (6–13%) — its
+catastrophic tail is `[OII]`-emission ↔ 4000Å-break absorption aliasing (≈42%) + genuine
+faint-line scatter (≈50%); z-v2 won't help ELG, so the ELG lever is the line-aware
+loss / decode-rule / oversampling, not the tail extension. The lift is QSO-specific, as
+predicted. Primary Stage-A success metric: QSO gross-η drop + QSO z_pred extending past
+2.13 to track z_true.
+
+### 2026-06-28 (cont.): Z1 Stage A RESULT — ceiling lifted, QSO outliers cut (fine-tune validates)
+
+Fine-tuned V3 from `best.pt` with the z-v2 tokenizer (gr=4.0), DDP-4 on the DR1 TRAIN
+split (959k spectra, 1500 shards), 8000 steps (~44 min/run), blind-z per-type eval on a
+60k held-out VAL subset. **Two parallel 4-GPU jobs** (per the parallel-NERSC workflow):
+`v3_tail` (z-v2 only) vs `v3_over` (z-v2 + high-z oversample ×20). Script
+`nersc/finetune_zhead.py`; runner `$SCRATCH/zheadft/inner.sh`; artifacts
+`$SCRATCH/zheadft/out/{best,zr,metrics}_v3_{tail,over}.*`; parity
+`/tmp/zr_plots/zhead/parity_v3_tail.png`.
+
+**`v3_tail` is the winner** (step 8000, vs original V3 per-type baseline):
+
+| type | orig σ_NMAD | **v3_tail σ_NMAD** | orig | v3_tail | note |
+|---|---|---|---|---|---|
+| BGS | 0.00064 | 0.00075 | — | — | minor regression (coarser low-z bins + short FT) |
+| LRG | 0.00107 | 0.00135 | — | — | minor regression |
+| ELG | 0.00326 | **0.00185** | — | — | **improved** |
+| QSO | 0.00476 | **0.00187** | gross-η 23.5% | **6.7%** | **2.5× better, ceiling gone** |
+
+**Headlines.** (1) **Ceiling LIFTED:** QSO blind z_pred now reaches **4.31** (was hard-
+pinned ~2.07); **14.3% of QSOs predicted above the old 2.13 ceiling**, tracking true z to
+~4.3 in the parity plot. (2) **QSO catastrophic outliers cut ~72%** (gross-η 23.5%→6.7%) —
+matching the Step-0(b) prediction that 60–74% of QSO gross outliers were ceiling-limited.
+QSO σ_NMAD 2.5× better. (3) **ELG also improved** (0.00326→0.00185) — the wider tokenizer +
+extra training helped. (4) **Minor BGS/LRG regression** (~15–25%): the cost of the gr=4.0
+bin remap (low-z bin width 0.00027→0.00035) + a short 8k-step fine-tune from a 200k model;
+expected to recover in a from-scratch run. (5) **Oversampling ×20 is counter-productive** —
+`v3_over` is worse on every axis (BGS 0.00107, QSO 0.00187 grossEta 0.084): z-v2 alone gives
+the head its high-z bins, and 959k spectra already carry enough high-z QSO signal, so
+oversampling just disturbs the bulk. **Clean negative result — z-v2 tail-only is the fix.**
+
+**Op note (DDP under interactive salloc).** `srun -n4 --gpus-per-task=1` breaks DDP
+(`device_ids=[3]` → invalid ordinal) — that flag is for non-NCCL sharded jobs. The working
+interactive-DDP pattern is `srun -n1 torchrun --nproc_per_node=4` with
+`set_device(LOCAL_RANK)` (all 4 GPUs visible). 0.33 s/step at batch 64×4.
+
+**Next:** Stage B (full fresh ~200k run with z-v2 baked in) would recover the BGS/LRG bin-
+remap cost while keeping the QSO gain — gated decision (multi-day). Cheaper middle path: a
+longer (30–50k-step) fine-tune to let the low-z bins re-sharpen.
+
+### 2026-06-28 (cont.): Z1 Stage B LAUNCHED — V4 full fresh run with z-v2 baked in
+
+Stage A validated the ceiling fix (decisive), so launched the writeup-grade **V4** =
+full from-scratch pretrain with the z-v2 tokenizer (gaussian_range=4.0) baked in from step
+0, so the model co-adapts to the high-z vocabulary and the BGS/LRG bin-remap regression
+(the only Stage-A cost) is avoided. Run `approach_a_v2cache_x2x3_zv2_ddp4` — identical
+config to the original V3 (`aqxmwgl1`): approach a, X2 masked-targets-only + U[0.15,0.75]
+mask, 4096 bins, soft σ=24, weight 1.0, enc-mask 0.5 / red-mask 0.5, bf16, d768/6+6/12h,
+batch 32×4, lr 8e-4, 200k steps, holdout 0.05 — the **only** change is
+`--z-gaussian-range 4.0`.
+
+**Code:** added `--z-gaussian-range` (default 3.0) to `nersc/train_transformer.py`
+(passed to `RedshiftTokenizer`; the fitted z-tokenizer + its range persist in every
+checkpoint, so resumes keep gr=4.0).
+
+**Auto-resume across 4h interactive sessions (per user):** `nersc/v4_driver.sh` (nohup'd
+on a login node, pid logged in `$SCRATCH/v4/driver.log`) loops: grab a 4-GPU interactive
+node `-t 240`, resume from the rolling `last.pt` (fresh first time), stop when `step >=
+200000` (writes a `DONE` marker). Uses the proven interactive-DDP pattern
+`srun --gpu-bind=none` (all 4 GPUs visible, `set_device(local_rank)`), NOT
+`--gpus-per-task=1` (which breaks DDP under interactive salloc). Driver re-allocates every
+time the 4h session ends until 200k. First job 55211991.
+
+**Canonical paths:** run dir `$SCRATCH/deepsrch/checkpoints/approach_a_v2cache_x2x3_zv2_ddp4/`
+(`last.pt` rolling, `best.pt`, `metrics.jsonl`); driver `nersc/v4_driver.sh` +
+`$SCRATCH/v4/{driver.log,nohup.out}`.
+
+## 2026-06-29: NERSC account → m5374 + scratch→CFS backup (data durability)
+
+Per user: moved all NERSC compute off `deepsrch` to **m5374** (GPU `-A m5374_g`) and set up
+regular scratch→CFS backups so a `$SCRATCH` purge can't lose run data.
+- **Account swap.** Repo-wide `deepsrch_g`→`m5374_g` and `cdirs/deepsrch`→`cdirs/m5374` in all
+  `nersc/*.sh` + `*.slurm` + README; redeployed active launchers (`v4_once.sh`, `ab_decouple.sh`)
+  to their `$SCRATCH` work dirs. **Running jobs can't be re-charged mid-flight** — V4 (`v4zv2`)
+  and the A/B (`abdec`) stay on `deepsrch_g`; the switch takes effect on their next relaunch.
+  The `$SCRATCH/deepsrch/...` scratch folder name is incidental (live run dirs) and untouched.
+  Verified `m5374_g` is a valid GPU association for joe2k; `m5374` CFS = **20 TB** quota.
+- **Backups.** `$SCRATCH/cfs_backup.sh` (additive `rsync -a`, no `--delete`, `flock`-guarded)
+  mirrors `$SCRATCH/deepsrch/checkpoints` + `zr`/`manifests`/`sdss_ft`/`examples`/`zheadft` →
+  `/global/cfs/cdirs/m5374/joe2k/scratch/`. Scheduled via **`scrontab`** (`cron` QOS, `0 */6 * * *`,
+  `-t 06:00:00`, log `$SCRATCH/cfs_backup_cron.log`). One-time `cfs_migrate_run.sh` copied the old
+  `deepsrch` CFS (`/global/cfs/cdirs/deepsrch/joe2k/`, ~20 G) → `m5374/joe2k/deepsrch_cfs_backup/`.
+  Initial full sync (203 G checkpoints) kicked off on a login node; incrementals are fast.
+  Op notes: the `xfer` QOS sbatch errored ("No architecture specified") and the DTN host key
+  wasn't trusted, so the bulk copy ran via login-node `nohup`; the recurring job uses `cron` QOS.
+  Token cache `$SCRATCH/dr1_tokenized_v2` is intentionally NOT backed up (reproducible from DR1).
+
+### 2026-06-28 (cont.): Z1 Stage B — V4 launch hardened (agent-driven resume, no login-node loop)
+
+The first V4 launch attempt thrashed: a login-node `nohup` driver loop + NERSC's ssh
+login-node round-robin meant orphaned driver processes scattered across login nodes kept
+respawning interactive jobs in pairs (one per stray driver), and `pkill`/`scancel -u` only
+hit the current node / are blocked. Root causes + fixes learned:
+- **DDP under interactive salloc:** `srun --gpu-bind=none` HUNG in NCCL init (only rank 0
+  got a CUDA ctx, GPU util 0%). The working pattern is `srun -n1 torchrun --nproc_per_node=4`
+  (validated: train_transformer.py reached **step 200 @ 5.7 steps/s** with it).
+- **Throughput 5.7 steps/s** ⇒ a 4h chunk ≈ 80k steps ⇒ **200k ≈ 3 interactive sessions**.
+- **Cross-login-node cleanup:** internal hop `ssh loginNN` (BatchMode) works; find a job's
+  submit node via `scontrol show job <id> | grep AllocNode:Sid`; kill only own procs with
+  `pkill -u joe2k -f zv2` (the run name uniquely tags driver/salloc/srun). Never `scancel -u`
+  (cancel by explicit JOBID).
+
+**Final design (agent-driven, per user):** NO persistent login-node driver. `nersc/v4_once.sh`
+runs exactly **one** 4h chunk — singleton-guarded (`-J v4zv2`, aborts if a `v4zv2` job already
+queued), resume-aware (`--resume last.pt` if present), torchrun DDP. The agent re-invokes it
+each time the chunk ends (checked via scheduled wake-ups + `squeue`) until `step>=200000`.
+A double-invoke is harmless (singleton). Fresh run started (job 55214020); stale partial run
+dir archived to `..._stale_*`.
+
+---
+
+## 2026-06-29: Z2 — Decoupled-masking objective (separate the spectrum & redshift tasks)
+
+**Motivation (code-confirmed).** In the V3/V4 joint Approach-A objective the **spectrum mask**
+(per-step `U[0.15,0.75]`) and the **redshift mask** (per-sample `p=0.5`) are drawn from two
+**independent** `torch.rand()` calls (`src/training/sequences.py`). Consequence: **~50% of
+predict-z training examples also have 15–75% of the spectrum masked**, while **eval blind-z
+always uses the full spectrum** (`encoder_mask_ratio=0, redshift_mask_ratio=1`). Real
+train/test mismatch, worst for QSO/ELG where masking can delete the one line (Lyα, [OII]) that
+fixes z. Symmetrically, reconstruction hides the true z ~50% of the time, denying the decoder
+the single variable that sets every line's rest-frame wavelength. (User-raised; agents verified
+the independence in code, and that `loss_spectrum≈3.3` nats over the 1024-LFQ vocab is
+aleatoric-floor convergence — flux R² already 0.97–0.99 pooled — not under-training.)
+
+**Design — three per-sample modes (Approach A only), the user-chosen hybrid.** Per sample draw
+`recon ~ Bernoulli(1-blind_z_frac)`; if recon, `show_z ~ Bernoulli(recon_z_shown_frac)`:
+- **Z-task** (`blind_z_frac`, def 0.5): full spectrum, z→REDMASK, predict z. **z supervised
+  here and ONLY here** — always from a full spectrum (matches inference).
+- **Recon+z-shown** (`(1-bzf)·rzsf`, def 0.25): spectrum masked, true z shown, predict spectrum.
+- **Recon+z-hidden** (remainder, def 0.25): spectrum masked, z→REDMASK, predict spectrum.
+Recon rows set the position-0 redshift target to `-100` (no trivial z-copy gradient). Net:
+redshift gradient comes only from full-spectrum examples; reconstruction trains both with and
+without z, so the z-hidden recon *eval* is in-distribution AND the z-shown recon still delivers
+z-conditioning (the spectrum-side lever). `recon_z_shown_frac=0.0` collapses to the pure
+foundation-model "z never given, always predicted" objective (one flag, no code change) — the
+direction the user wants to move toward.
+
+**Eval — two clean passes everywhere** (`--two-pass-val`, implied by `--decouple-masks`; also
+set on the control arm for comparable numbers). The in-training val (`train_transformer.py`) now
+logs `val_z/*` (full spectrum, z hidden → redshift, **headline, drives best.pt**) and
+`val_recon/*` (spectrum masked, z hidden → reconstruction), replacing the old single
+half-masked pass that derived the redshift number from a partially-missing spectrum.
+
+**Code (this commit).** `src/training/sequences.py`: `tokenize_and_build(..., decouple_masks,
+blind_z_frac, recon_z_shown_frac)` three-mode branch (legacy independent path unchanged when
+off). `nersc/train_transformer.py`: flags `--decouple-masks --blind-z-frac --recon-z-shown-frac
+--two-pass-val`, startup guard (requires approach a + masked-targets-only + encoder mask > 0),
+two-pass val, best.pt on `val_z`. Local smoke test passes (Z-task rows: 0 masked spectrum +
+REDMASK z + spectrum target all -100; recon rows: masked spectrum + z target -100; z-shown rows
+carry the true z token; `recon_z_shown_frac=0` → z hidden everywhere; legacy path intact).
+
+**Validation plan — short from-scratch A/B (alongside V4, NOT disturbing it).** `nersc/ab_decouple.sh
+{ctrl|decouple}`: two from-scratch arms, **both z-v2 (gr=4.0)**, 50k steps (~2.4h @ 5.7 steps/s ⇒
+one 4h chunk), identical to the V3/V4 recipe except masking — CTRL = independent masks
+(`--two-pass-val`), DECOUPLE = `--decouple-masks --blind-z-frac 0.5 --recon-z-shown-frac 0.5`.
+Run dirs `$SCRATCH/deepsrch/checkpoints/abmask_{ctrl,dec}_zv2/`, jobs `abctrl`/`abdec`, ports
+29411/29412, online W&B. **Decision rule:** adopt for the V5 headline run iff DECOUPLE ≥ CTRL on
+QSO/ELG blind-z (σ_NMAD + gross-η) AND ≥ on z-hidden recon flux R² with no bulk (BGS/LRG)
+regression. Plan: `~/.claude/plans/temporal-waddling-dragonfly.md`.
+
+---
+
+## 2026-06-29: V4 completed (200k) + Z1 ceiling-fix confirmed + Z2 decoupled-mask A/B = NEGATIVE
+
+**V4 finished cleanly.** The z-v2 ceiling-fix fresh pretrain
+(`approach_a_v2cache_x2x3_zv2_ddp4`) ran the full 200k steps — **not** stalled (last train
+step 199980; `ar_final` ran at 200000; `best.pt`/`last.pt` written step 200000). Final
+in-training val `val_z_nmad=0.00048`, gross-outlier(>0.05) 2.7%, AUROC 0.979. No resume needed.
+The DECOUPLE A/B arm (`abmask_dec_zv2`) also reached its 50k target.
+
+**Per-type eval (DR1 val, N=965,970).** Harness `zr/zr_type_eval.py` — one pass gives blind-z
+(full spectrum, z masked → predict z) **and** z-hidden recon (50% spectrum masked, z hidden);
+3 checkpoints evaluated in parallel on 4-GPU interactive nodes; aggregated by
+`nersc/decab_analyze.py`. v450 = V4@50k (z_tokenizer grafted from last.pt), v4200 = V4@200k,
+dec50 = DECOUPLE@50k.
+
+```
+tag     type      N    z_sNMAD  gross_eta   z_R2  recon_fluxR2
+dec50   QSO   106848   0.23135    0.8876  -0.277      0.5565
+dec50   ELG   210961   0.13641    0.7610  -0.126     -0.5240
+dec50   ALL   965970   0.07242    0.4960   0.607      0.6121
+v450    QSO   106848   0.01050    0.1486   0.863      0.6050   (V4 indep-mask @50k = CTRL)
+v450    ELG   210961   0.00940    0.1853   0.677     -0.4956
+v450    ALL   965970   0.00408    0.0752   0.933      0.6313
+v4200   BGS   313075   0.00055    0.0082   0.805      0.7354
+v4200   LRG   168372   0.00103    0.0105   0.947      0.6324
+v4200   ELG   210961   0.00211    0.0742   0.827     -0.4551
+v4200   QSO   106848   0.00323    0.0725   0.935      0.6353
+v4200   ALL   965970   0.00074    0.0303   0.964      0.6451
+```
+
+**Z1 — ceiling fix WORKS (headline win).** QSO z-ceiling check (old z-v1 wall = 2.13):
+v4200 maxZpred **4.08**, p99 **3.46**, `frac_pred>2.13 = 0.192` vs `frac_true>2.13 = 0.202`
+(was ~0 under z-v1) — the head now populates the high-z QSO tail, matching truth to ~1%.
+Per-type σ_NMAD excellent and **no bulk regression**: BGS 0.00055, LRG 0.00103, ELG 0.00211,
+QSO 0.00323 (QSO down from 0.0105 @50k → 0.0032 @200k). z-hidden recon flux R² pooled 0.645
+(ELG negative across **all** arms — faint emission-line objects are hard to reconstruct
+without z; not a regression). **V4 is the strongest redshift model to date.**
+
+**Z2 — decoupled masking FAILS the A/B (do NOT adopt).** At the fair 50k-vs-50k point,
+DECOUPLE is ~20× **worse** on blind-z than the independent-mask control on every type
+(QSO σ_NMAD 0.231 vs 0.011, gross-η 0.89 vs 0.15; ELG 0.136 vs 0.009; pooled 0.072 vs 0.004)
+AND worse on z-hidden recon flux R² (0.612 vs 0.631). Confirmed by **two independent** measures:
+(a) this offline harness, and (b) the run's own two-pass val (`val_z_z_nmad=0.044`,
+`val_z_outlier_frac_05=0.385`, `loss_redshift` stuck ~6.96 vs V4's 5.08; training `redshift_acc`
+flat at 0.0). Note the comparison is *generous* to DECOUPLE — its 50k run fully annealed LR→0
+while V4@50k is only 25% through its 200k cosine (LR still ~7e-4), yet the annealed DECOUPLE
+still loses badly. **Decision: keep independent masks; V5 headline = V4 recipe (z-v2 + indep
+masks). Negative result recorded.** Open question (not blocking): the z head barely moved
+(redshift_acc≡0, loss_redshift flat) — magnitude suggests the fully-split objective starves
+z-learning (z supervised only on 50% pure-z samples, never co-trained with recon on the same
+forward pass), possibly worth a re-audit / longer-schedule retry before fully discarding the
+idea — but the 50k signal is strongly negative and the config/smoke-test confirm the decoupled
+path executed as designed (`decouple_masks:true`, Z-task rows: full spectrum + z supervised;
+recon rows: masked spectrum + z target −100).
+
+**Two NERSC gotchas learned (recorded for reuse).** (1) Periodic `step_NNNNN.pt` checkpoints
+are **model-only** — no embedded `z_tokenizer` → `_restore_z_tokenizer` KeyError; graft it from
+the run's `last.pt` (z-tokenizer is fixed at init, identical all run) into a `*_zt.pt` copy.
+(2) Attaching `srun --jobid=<J> --overlap` into an existing salloc allocation does **not** expose
+GPUs to the new step (lands on CPU even with `--gpus-per-node=4`); run the extra eval in its own
+fresh salloc node instead of overlapping.
+
+**V4 LOCKED as the primary release model.** Stripped `best.pt` (step 198000, best-val,
+val_loss 7.918) of optimizer/scaler (key is `optim`, not `optimizer`; 1237→413 MB, z_tokenizer
+kept) → `checkpoints/release/transformer_v4_zv2/best.pt` (git-LFS) + `config.json`. MANIFEST:
+added `transformer_v4_zv2` to `models`, set `default_transformer=transformer_v4_zv2` +
+`default_tokenizer=spectrum_tokenizer_v2`, added `transformer_v4_results` block (per-type
+σ_NMAD + QSO ceiling). Registered in `scripts/setup_release_checkpoints.py` ARTIFACT_MAP
+(`local_pt`). **Parity PNGs rendered** (`scripts/render_v4_parity.py` from the 966k blind-z
+`type_v4200_r0.npz`): `plots/v4_parity_by_type.png` (2×2 hexbin BGS/LRG/ELG/QSO, tight 1:1)
+and `plots/v4_parity_qso_ceiling.png` (QSO parity + z-dist, old 2.13 wall marked; pred 19.2%
+vs truth 20.2% above it, max z_pred 4.08 — the ceiling fix visualized).
+
+**V3↔V4 harmonized comparison (recomputed with identical current `zr_type_eval` code; used to
+fill the "Updates" deck slides 75–77).** Pulled the cached V3 dump (`zr/type_v3_r{0,1}.npz`) and
+recomputed both models the same way. Per-type σ_NMAD / η>5σ / zR² (V3 → V4): BGS 0.00064→0.00055,
+5.3→3.2%, 0.80→0.81; LRG 0.00107→0.00103, 4.6→4.9%, 0.94→0.95; ELG 0.00326→0.00211, 19.0→13.7%,
+0.75→0.83; QSO 0.00476→0.00323, 28.1→12.7%, 0.76→0.94. Pooled σ_NMAD 0.00090→0.00074; gross
+outliers>0.05 6.2→3.0%. QSO ceiling: V3 **max z_pred 2.07, 0% above 2.13** → V4 4.08, 19.2% (truth
+20.2%). **Reconstruction unchanged** (flux RMS ~identical). NOTE the flux-R² "discrepancy" vs the
+old slide-41 V3 numbers is purely a **definition choice, not a regression**: *pooled* R²
+(1−Σ_pixels rms² / Σ_pixels var — the definition the slide-41 formula box describes) = 0.993 / 0.986
+/ 0.448 / 0.969 for V3 and 0.993 / 0.987 / 0.464 / 0.968 for V4 (≈identical); *median of per-sample*
+R² = ~0.63–0.74 for BOTH. Slides 76–77 use the pooled definition to stay consistent with slide 41.
+V4 wins on every type's σ_NMAD with no regression — the headline of the new "Transformer V4" deck
+section. (Earlier I'd reported recon flux R² ≈0.645 — that was the median-per-sample metric from
+`decab_analyze.py`, not the deck's pooled metric; both show V3≈V4.)
