@@ -1,0 +1,23 @@
+{
+  "model_id": "transformer_v4_zv2",
+  "display_name": "Spectrum-FM Transformer V4 — z-v2 high-z ceiling (4096-bin soft, gaussian_range 4.0, full 200k pretrain)",
+  "wandb_artifact": "jjayaseelan-university-of-san-francisco/redshifty/approach_a_v2cache_x2x3_zv2_ddp4 (run dcynbaqt, best.pt @ step 198000 stripped of optimizer)",
+  "checkpoint": "transformer_v4_zv2/best.pt",
+  "role": "transformer",
+  "d_model": 768,
+  "n_encoder_layers": 6,
+  "n_decoder_layers": 6,
+  "n_heads": 12,
+  "dropout": 0.0,
+  "approach": "a",
+  "encoder_mask_ratio": 0.5,
+  "redshift_mask_ratio": 0.5,
+  "redshift_soft_sigma": 24.0,
+  "z_bins": 4096,
+  "z_gaussian_range": 4.0,
+  "val_loss": 7.917892694473267,
+  "step": 198000,
+  "has_embedded_z_tokenizer": true,
+  "requires_tokenizer": "spectrum_tokenizer_v2",
+  "note": "Supersedes V3. z-v2 tokenizer (gaussian_range 4.0) lifts the QSO high-z ceiling from z~2.13 to z~4.4. Per-type DR1-val blind-z sigma_NMAD: BGS 0.00055, LRG 0.00103, ELG 0.00211, QSO 0.00323; pooled 0.00074, gross-outlier(>0.05) 3.0%. QSO frac(z_pred>2.13)=0.192 vs truth 0.202 (was ~0 under z-v1)."
+}

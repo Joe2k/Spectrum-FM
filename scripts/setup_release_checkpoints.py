@@ -84,6 +84,18 @@ ARTIFACT_MAP = {
         "requires_tokenizer": "spectrum_tokenizer_v2",
         "local_pt": "checkpoints/release/transformer_v3_4096soft/best.pt",
     },
+    # V4: z-v2 high-z ceiling fix (gaussian_range 4.0), full 200k pretrain.
+    # Supersedes V3 and is the default transformer. best.pt = run best-val
+    # (step 198000) stripped of optimizer/scaler (413MB), embeds z_tokenizer.
+    "transformer_v4_zv2": {
+        "model_id": "transformer_v4_zv2",
+        "display_name": "Spectrum-FM Transformer V4 — z-v2 high-z ceiling (4096-bin soft, gaussian_range 4.0, full 200k pretrain)",
+        "wandb_artifact": f"{WANDB_ENTITY}/{WANDB_PROJECT}/approach_a_v2cache_x2x3_zv2_ddp4 (run dcynbaqt, best.pt @ step 198000 stripped of optimizer)",
+        "role": "transformer",
+        "approach": "a",
+        "requires_tokenizer": "spectrum_tokenizer_v2",
+        "local_pt": "checkpoints/release/transformer_v4_zv2/best.pt",
+    },
 }
 
 
@@ -209,8 +221,8 @@ def main() -> int:
         "wandb_entity": WANDB_ENTITY,
         "wandb_project": WANDB_PROJECT,
         "models": models_manifest,
-        "default_tokenizer": "spectrum_tokenizer_v1",
-        "default_transformer": "approach_a_fm_v1_10k_a_ddp4_redmask50_v9",
+        "default_tokenizer": "spectrum_tokenizer_v2",
+        "default_transformer": "transformer_v4_zv2",
     }
     # Preserve metrics if MANIFEST already synced from W&B; else write stub.
     existing = RELEASE / "MANIFEST.json"
