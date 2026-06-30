@@ -216,6 +216,161 @@ class TestMaskedTargetsOnly:
 
 
 # ---------------------------------------------------------------------------
+# Decoupled-masking objective (Z2) — three-mode per-sample split (Approach A)
+# ---------------------------------------------------------------------------
+
+class TestDecoupledMasks:
+    """Z2 surgical-alignment fix (2026-06-30):
+
+    Pure DECOUPLE (recon rows all had position-0 = -100) starved z-learning
+    because the encoder representation was never co-trained for "z + spectrum"
+    on the same forward pass. The fix: only the recon+z-HIDDEN rows lose
+    their z supervision; recon+z-shown rows keep the true z at position-0
+    (the trivial-copy case, loss ~0, but the channel stays warm and the
+    encoder rep is trained under "z shown + spectrum recon").
+    """
+
+    def test_off_uses_legacy_independent_masks(self):
+        # The legacy path leaves position-0 supervised on every row.
+        spec, z = FakeSpecTok(n_tokens=8), FakeZTok()
+        raw = _make_raw_batch(B=4)
+        g = torch.Generator().manual_seed(11)
+        _, _, tgt, _ = tokenize_and_build(
+            raw, spec, z, "a", torch.device("cpu"),
+            encoder_mask_ratio=0.5, redshift_mask_ratio=0.5,
+            rng=g, mask_targets_only=True,
+        )
+        # No position-0 -100 in legacy mode.
+        assert (tgt[:, 0] == -100).sum().item() == 0
+
+    def test_z_task_rows_supervise_z(self):
+        # All-Z-task batch (blind_z_frac=1.0). Every row should have
+        # position-0 supervised and a full unmasked spectrum.
+        spec, z = FakeSpecTok(n_tokens=8), FakeZTok()
+        raw = _make_raw_batch(B=4)
+        g = torch.Generator().manual_seed(0)
+        enc, _, tgt, mp = tokenize_and_build(
+            raw, spec, z, "a", torch.device("cpu"),
+            encoder_mask_ratio=0.5, decouple_masks=True,
+            blind_z_frac=1.0, recon_z_shown_frac=0.0,
+            rng=g, mask_targets_only=True,
+        )
+        # Z-task rows have full spectrum (no MASK) and z hidden in encoder.
+        assert mp is not None
+        assert not mp.any()
+        assert (enc[:, 1] == REDMASK_TOKEN).all()
+        # Position-0 always supervised on Z-task rows.
+        assert (tgt[:, 0] >= REDSHIFT_TOKEN_OFFSET).all()
+        assert (tgt[:, 0] != -100).all()
+
+    def test_recon_rows_have_masked_spectrum(self):
+        # All-recon batch (blind_z_frac=0.0). Every row should have a
+        # masked spectrum and z supervised or -100 by mode.
+        spec, z = FakeSpecTok(n_tokens=8), FakeZTok()
+        raw = _make_raw_batch(B=4)
+        g = torch.Generator().manual_seed(1)
+        enc, _, tgt, mp = tokenize_and_build(
+            raw, spec, z, "a", torch.device("cpu"),
+            encoder_mask_ratio=1.0, decouple_masks=True,
+            blind_z_frac=0.0, recon_z_shown_frac=0.5,
+            rng=g, mask_targets_only=True,
+        )
+        assert mp is not None
+        assert mp.all()  # full encoder mask + recon mode => every spec pos masked
+        # Some rows are z-shown, some are z-hidden (REDMASK).
+        assert ((enc[:, 1] >= REDSHIFT_TOKEN_OFFSET) | (enc[:, 1] == REDMASK_TOKEN)).all()
+
+    def test_only_zhidden_recon_rows_lose_z_supervision(self):
+        # The headline test for the alignment fix. Default fractions:
+        # blind_z_frac=0.5, recon_z_shown_frac=0.5. With many samples,
+        # we expect three populations:
+        #   1. Z-task rows (50%): position-0 supervised
+        #   2. recon+z-shown rows (25%): position-0 supervised (trivial copy)
+        #   3. recon+z-hidden rows (25%): position-0 = -100
+        spec, z = FakeSpecTok(n_tokens=8), FakeZTok()
+        raw = _make_raw_batch(B=64)  # large batch -> stable fractions
+        g = torch.Generator().manual_seed(2026)
+        enc, _, tgt, _ = tokenize_and_build(
+            raw, spec, z, "a", torch.device("cpu"),
+            encoder_mask_ratio=0.5, decouple_masks=True,
+            blind_z_frac=0.5, recon_z_shown_frac=0.5,
+            rng=g, mask_targets_only=True,
+        )
+        # Re-derive the modes from the encoder + target (we can't peek
+        # at the private is_ztask / show_z, but we can classify each row):
+        #   - Z-task: encoder z is REDMASK, spectrum has no MASK tokens
+        #     (full spectrum).
+        #   - recon+z-shown: encoder z is the true redshift token,
+        #     spectrum has MASK tokens.
+        #   - recon+z-hidden: encoder z is REDMASK, spectrum has MASK tokens.
+        # "Spectrum has MASK tokens" = at least one MASK in the spectrum slice.
+        spec_has_mask = (enc[:, 2:10] == MASK_TOKEN).any(dim=1)
+        is_ztask = (enc[:, 1] == REDMASK_TOKEN) & ~spec_has_mask
+        is_recon_zshown = (enc[:, 1] >= REDSHIFT_TOKEN_OFFSET) & spec_has_mask
+        is_recon_zhidden = (enc[:, 1] == REDMASK_TOKEN) & spec_has_mask
+        # All rows are exactly one mode.
+        all_modes = is_ztask.long() + is_recon_zshown.long() + is_recon_zhidden.long()
+        assert (all_modes == 1).all(), (
+            f"row mode classification failed: ztask={is_ztask.sum().item()}, "
+            f"recon_zshown={is_recon_zshown.sum().item()}, "
+            f"recon_zhidden={is_recon_zhidden.sum().item()}"
+        )
+        # Z-task rows: position-0 supervised.
+        if is_ztask.any():
+            assert (tgt[is_ztask, 0] >= REDSHIFT_TOKEN_OFFSET).all()
+        # recon+z-shown rows: position-0 supervised (trivial copy).
+        if is_recon_zshown.any():
+            assert (tgt[is_recon_zshown, 0] >= REDSHIFT_TOKEN_OFFSET).all()
+        # recon+z-hidden rows: position-0 = -100.
+        if is_recon_zhidden.any():
+            assert (tgt[is_recon_zhidden, 0] == -100).all()
+        # The new alignment behavior: position-0 is -100 on fewer rows
+        # than is_recon (because z-shown recon rows are supervised).
+        n_recon_zhidden = is_recon_zhidden.sum().item()
+        n_recon = (~is_ztask).sum().item()
+        assert n_recon_zhidden < n_recon, (
+            "alignment fix did not reduce z-supervision loss: "
+            f"{n_recon_zhidden}/{n_recon} recon rows lost z supervision"
+        )
+
+    def test_recon_z_shown_zero_collapses_to_old_decouple_behavior(self):
+        # recon_z_shown_frac=0.0 -> z hidden everywhere on recon rows
+        # (the "pure foundation model" extreme). The alignment fix is a
+        # no-op in this regime: all recon rows lose z supervision, same
+        # as the original DECOUPLE behavior.
+        spec, z = FakeSpecTok(n_tokens=8), FakeZTok()
+        raw = _make_raw_batch(B=32)
+        g = torch.Generator().manual_seed(99)
+        enc, _, tgt, _ = tokenize_and_build(
+            raw, spec, z, "a", torch.device("cpu"),
+            encoder_mask_ratio=0.5, decouple_masks=True,
+            blind_z_frac=0.5, recon_z_shown_frac=0.0,
+            rng=g, mask_targets_only=True,
+        )
+        # Every recon row (encoder z = REDMASK with masked spectrum, since
+        # show_z is always false) has position-0 = -100. Distinguish from
+        # Z-task rows (which also have encoder z = REDMASK but an unmasked
+        # spectrum) by checking the spectrum slice for MASK tokens.
+        spec_has_mask = (enc[:, 2:10] == MASK_TOKEN).any(dim=1)
+        is_recon = (enc[:, 1] == REDMASK_TOKEN) & spec_has_mask
+        if is_recon.any():
+            assert (tgt[is_recon, 0] == -100).all()
+
+    def test_legacy_path_unchanged(self):
+        # decouple_masks=False with mask_targets_only must keep every
+        # position-0 supervised (the old behavior).
+        spec, z = FakeSpecTok(n_tokens=8), FakeZTok()
+        raw = _make_raw_batch(B=4)
+        g = torch.Generator().manual_seed(7)
+        _, _, tgt, _ = tokenize_and_build(
+            raw, spec, z, "a", torch.device("cpu"),
+            encoder_mask_ratio=0.5, decouple_masks=False,
+            rng=g, mask_targets_only=True,
+        )
+        assert (tgt[:, 0] == -100).sum().item() == 0
+
+
+# ---------------------------------------------------------------------------
 # Redshift conditioning dropout — REDMASK in the encoder
 # ---------------------------------------------------------------------------
 

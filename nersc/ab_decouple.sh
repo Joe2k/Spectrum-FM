@@ -18,7 +18,10 @@ case "$ARM" in
   decouple)
     RUN=abmask_dec_zv2;   JOB=abdec;   PORT=29412
     MASK_ARGS="--encoder-mask-ratio 0.5 --decouple-masks --blind-z-frac 0.5 --recon-z-shown-frac 0.5" ;;
-  *) echo "unknown arm '$ARM' (want ctrl|decouple)"; exit 2 ;;
+  decouple_v2)
+    RUN=abmask_dec_v2_zv2;  JOB=abdecv2;  PORT=29413
+    MASK_ARGS="--encoder-mask-ratio 0.5 --decouple-masks --blind-z-frac 0.5 --recon-z-shown-frac 0.5" ;;
+  *) echo "unknown arm '$ARM' (want ctrl|decouple|decouple_v2)"; exit 2 ;;
 esac
 
 LAST=$SC/deepsrch/checkpoints/$RUN/last.pt
